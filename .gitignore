@@ -1,5 +1,6 @@
 # Python env
 venv/
+__pycache__/
 
 # Bulky source media (video and rasters stay local-only; GPX/npz are committed)
 raw/*.mp4
