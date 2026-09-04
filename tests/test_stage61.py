@@ -43,10 +43,11 @@ def test_loop_closes_with_provisional_connector(cl):
     first, last = cl["stations"][0], cl["stations"][-1]
     assert np.hypot(first["x"] - last["x"], first["y"] - last["y"]) < 1.5
 
-    # Check connector curvature: min 3-point turning radius >= 7.5 m
+    # Check curvature over joint region (last 20 loop stations + connector): min radius >= 7.5 m
     prov_start = np.argmax(prov)
     sts = cl["stations"]
-    for i in range(prov_start, len(sts) - 2):
+    joint_start = max(0, prov_start - 20)  # Last 20 recorded stations + connector
+    for i in range(joint_start, len(sts) - 2):
         a = np.array([sts[i]["x"], sts[i]["y"]])
         b = np.array([sts[i+1]["x"], sts[i+1]["y"]])
         c = np.array([sts[i+2]["x"], sts[i+2]["y"]])
@@ -54,7 +55,7 @@ def test_loop_closes_with_provisional_connector(cl):
         ab = np.linalg.norm(b-a); bc = np.linalg.norm(c-b); ca = np.linalg.norm(c-a)
         area2 = abs(cross)
         r = ab*bc*ca/(2*area2) if area2 > 1e-9 else 1e9
-        assert r > 7.5, f"Turning radius {r:.1f} m too tight at provisional stations {i}-{i+1}-{i+2}"
+        assert r > 7.5, f"Turning radius {r:.1f} m too tight at stations {i}-{i+1}-{i+2}"
 
 
 def test_grades_and_datum(cl):

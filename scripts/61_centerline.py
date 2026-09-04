@@ -84,11 +84,39 @@ def main():
     tangents /= np.linalg.norm(tangents, axis=1, keepdims=True)
     conn = hermite_connector(loop[-1], tangents[-1], loop[0], tangents[0])
 
-    # Relax connector curvature to avoid self-intersecting cross-sections
-    conn = relax_curvature(conn, loop[-1], loop[0], min_radius=8.0)
-    # Re-sample including anchors to maintain proper 1 m spacing from loop
-    conn_with_anchors = np.vstack([loop[-1:], conn, loop[0:1]])
-    conn = resample_1m(conn_with_anchors)  # First point is at 1 m from loop[-1]
+    # Relax + resample the joint region (last 20 recorded stations + connector) together,
+    # iterating {relax, resample} until the 3-point turning radius measured on the
+    # RESAMPLED polyline is >= min_radius -- a single relax-then-resample pass can
+    # re-tighten curvature the resample perturbs, so converge the two together.
+    JOINT = 20
+    anchor_start, anchor_end = loop[-JOINT - 1], loop[0]
+    blend = np.vstack([loop[-JOINT:], conn])
+    min_radius = 8.0
+    radii_by_cycle = []
+    cycle = 0
+    for cycle in range(1, 11):
+        blend = relax_curvature(blend, anchor_start, anchor_end, min_radius=min_radius, iters=1000)
+        blend = resample_1m(np.vstack([anchor_start[None, :], blend, anchor_end[None, :]]))
+        p = np.vstack([anchor_start[None, :], blend, anchor_end[None, :]])
+        a, b, c = p[:-2], p[1:-1], p[2:]
+        cross = (b[:, 0]-a[:, 0])*(c[:, 1]-a[:, 1]) - (b[:, 1]-a[:, 1])*(c[:, 0]-a[:, 0])
+        ab = np.linalg.norm(b-a, axis=1); bc = np.linalg.norm(c-b, axis=1); ca = np.linalg.norm(c-a, axis=1)
+        area2 = np.abs(cross)
+        r = np.where(area2 > 1e-9, ab*bc*ca/(2*area2), 1e9)
+        r_min = float(r.min())
+        radii_by_cycle.append(r_min)
+        if r_min >= min_radius:
+            break
+    print(f"joint relax/resample converged: radius={r_min:.2f} m after {cycle} cycle(s); "
+          f"per-cycle radii={[round(x, 2) for x in radii_by_cycle]}")
+
+    # Split the relaxed blend back into "loop tail" (~JOINT*STEP m from anchor_start) and
+    # connector, by arc length since resampling may change the point count slightly.
+    seg = np.linalg.norm(np.diff(np.vstack([anchor_start[None, :], blend]), axis=0), axis=1)
+    arc = np.cumsum(seg)
+    split_idx = int(np.searchsorted(arc, JOINT * STEP))
+    loop = np.vstack([loop[:-JOINT], blend[:split_idx]])
+    conn = blend[split_idx:]
 
     # Filter connector to avoid near-coincident stations (< 0.5 m apart)
     kept_conn = []
