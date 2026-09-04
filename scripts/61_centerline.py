@@ -53,11 +53,42 @@ def hermite_connector(p_end, t_end, p_start, t_start):
                      np.interp(s_out, arc, pts[:, 1])], axis=1)
 
 
+def relax_curvature(pts, anchor_start, anchor_end, min_radius=8.0, iters=300):
+    """Laplacian-relax interior points until every 3-point turning radius >= min_radius."""
+    p = np.vstack([anchor_start, pts, anchor_end])
+    for _ in range(iters):
+        a, b, c = p[:-2], p[1:-1], p[2:]
+        cross = (b[:, 0]-a[:, 0])*(c[:, 1]-a[:, 1]) - (b[:, 1]-a[:, 1])*(c[:, 0]-a[:, 0])
+        ab = np.linalg.norm(b-a, axis=1); bc = np.linalg.norm(c-b, axis=1)
+        ca = np.linalg.norm(c-a, axis=1)
+        area2 = np.abs(cross)
+        r = np.where(area2 > 1e-9, ab*bc*ca/(2*area2), 1e9)
+        if r.min() >= min_radius:
+            break
+        p[1:-1] = 0.5*p[1:-1] + 0.25*(p[:-2] + p[2:])
+    return p[1:-1]
+
+
+def resample_1m(pts):
+    """Arc-length resample points to 1 m spacing."""
+    seg = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+    arc = np.concatenate([[0], np.cumsum(seg)])
+    s_out = np.arange(STEP, arc[-1], STEP)
+    return np.stack([np.interp(s_out, arc, pts[:, 0]),
+                     np.interp(s_out, arc, pts[:, 1])], axis=1)
+
+
 def main():
     loop = smooth_resample(load_track())
     tangents = np.gradient(loop, axis=0)
     tangents /= np.linalg.norm(tangents, axis=1, keepdims=True)
     conn = hermite_connector(loop[-1], tangents[-1], loop[0], tangents[0])
+
+    # Relax connector curvature to avoid self-intersecting cross-sections
+    conn = relax_curvature(conn, loop[-1], loop[0], min_radius=8.0)
+    # Re-sample including anchors to maintain proper 1 m spacing from loop
+    conn_with_anchors = np.vstack([loop[-1:], conn, loop[0:1]])
+    conn = resample_1m(conn_with_anchors)  # First point is at 1 m from loop[-1]
 
     # Filter connector to avoid near-coincident stations (< 0.5 m apart)
     kept_conn = []
