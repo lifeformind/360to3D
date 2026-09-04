@@ -1,0 +1,11 @@
+{
+ "m_per_px": 1.0293781340603463,
+ "rot_deg": -6.341640119280781,
+ "t": [
+  -734.4410319237165,
+  624.5599691011438
+ ],
+ "rms_m": 228.0302113822818,
+ "route_reversed": true,
+ "note": "maps y-flipped pixel coords -> ENU metres"
+}

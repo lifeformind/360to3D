@@ -1,0 +1,16 @@
+# Python env
+venv/
+
+# Bulky source media (video and rasters stay local-only; GPX/npz are committed)
+raw/*.mp4
+raw/*.insv
+raw/*.tif
+
+# Generated intermediates (recreate with scripts/run_generate.sh)
+work/
+logs/
+
+# OS noise
+Thumbs.db
+.DS_Store
+.claude/settings.local.json
