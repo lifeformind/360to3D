@@ -1,3 +1,4 @@
+import importlib
 import json
 import subprocess
 import numpy as np
@@ -5,6 +6,9 @@ import pytest
 from conftest import ROOT
 
 PY = str(ROOT / "venv" / "Scripts" / "python")
+# Module name starts with a digit, so it can't be a plain `import` -- use importlib.
+# conftest.py already puts scripts/ on sys.path.
+cl61 = importlib.import_module("61_centerline")
 
 
 @pytest.fixture(scope="module")
@@ -45,17 +49,11 @@ def test_loop_closes_with_provisional_connector(cl):
 
     # Check curvature over joint region (last 20 loop stations + connector): min radius >= 7.5 m
     prov_start = np.argmax(prov)
-    sts = cl["stations"]
     joint_start = max(0, prov_start - 20)  # Last 20 recorded stations + connector
-    for i in range(joint_start, len(sts) - 2):
-        a = np.array([sts[i]["x"], sts[i]["y"]])
-        b = np.array([sts[i+1]["x"], sts[i+1]["y"]])
-        c = np.array([sts[i+2]["x"], sts[i+2]["y"]])
-        cross = (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0])
-        ab = np.linalg.norm(b-a); bc = np.linalg.norm(c-b); ca = np.linalg.norm(c-a)
-        area2 = abs(cross)
-        r = ab*bc*ca/(2*area2) if area2 > 1e-9 else 1e9
-        assert r > 7.5, f"Turning radius {r:.1f} m too tight at stations {i}-{i+1}-{i+2}"
+    xy = np.stack([arr(cl, "x"), arr(cl, "y")], axis=1)[joint_start:]
+    r = cl61.circumradius(xy[:-2], xy[1:-1], xy[2:])
+    i_bad = joint_start + int(np.argmin(r))
+    assert r.min() > 7.5, f"Turning radius {r.min():.1f} m too tight at stations {i_bad}-{i_bad+1}-{i_bad+2}"
 
 
 def test_grades_and_datum(cl):

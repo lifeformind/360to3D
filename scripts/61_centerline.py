@@ -37,6 +37,20 @@ def smooth_resample(xy):
                      np.interp(s_out, arc, dense[:, 1])], axis=1)
 
 
+def circumradius(a, b, c):
+    """3-point circumradius for each row of point-triplet arrays a, b, c (Nx2).
+
+    r = |ab|*|bc|*|ca| / (2*area), where area = 0.5*|cross(b-a, c-a)|.
+    Degenerate (near-collinear) triplets return a large radius (1e9), matching
+    the "not tight" convention used throughout this module.
+    """
+    cross = (b[:, 0]-a[:, 0])*(c[:, 1]-a[:, 1]) - (b[:, 1]-a[:, 1])*(c[:, 0]-a[:, 0])
+    ab = np.linalg.norm(b-a, axis=1); bc = np.linalg.norm(c-b, axis=1)
+    ca = np.linalg.norm(c-a, axis=1)
+    area2 = np.abs(cross)
+    return np.where(area2 > 1e-9, ab*bc*ca/(2*area2), 1e9)
+
+
 def hermite_connector(p_end, t_end, p_start, t_start):
     """Cubic Hermite p_end->p_start honouring both tangents; resampled to 1 m."""
     chord = np.linalg.norm(p_start - p_end)
@@ -58,11 +72,7 @@ def relax_curvature(pts, anchor_start, anchor_end, min_radius=8.0, iters=300):
     p = np.vstack([anchor_start, pts, anchor_end])
     for _ in range(iters):
         a, b, c = p[:-2], p[1:-1], p[2:]
-        cross = (b[:, 0]-a[:, 0])*(c[:, 1]-a[:, 1]) - (b[:, 1]-a[:, 1])*(c[:, 0]-a[:, 0])
-        ab = np.linalg.norm(b-a, axis=1); bc = np.linalg.norm(c-b, axis=1)
-        ca = np.linalg.norm(c-a, axis=1)
-        area2 = np.abs(cross)
-        r = np.where(area2 > 1e-9, ab*bc*ca/(2*area2), 1e9)
+        r = circumradius(a, b, c)
         if r.min() >= min_radius:
             break
         p[1:-1] = 0.5*p[1:-1] + 0.25*(p[:-2] + p[2:])
@@ -98,17 +108,17 @@ def main():
         blend = relax_curvature(blend, anchor_start, anchor_end, min_radius=min_radius, iters=1000)
         blend = resample_1m(np.vstack([anchor_start[None, :], blend, anchor_end[None, :]]))
         p = np.vstack([anchor_start[None, :], blend, anchor_end[None, :]])
-        a, b, c = p[:-2], p[1:-1], p[2:]
-        cross = (b[:, 0]-a[:, 0])*(c[:, 1]-a[:, 1]) - (b[:, 1]-a[:, 1])*(c[:, 0]-a[:, 0])
-        ab = np.linalg.norm(b-a, axis=1); bc = np.linalg.norm(c-b, axis=1); ca = np.linalg.norm(c-a, axis=1)
-        area2 = np.abs(cross)
-        r = np.where(area2 > 1e-9, ab*bc*ca/(2*area2), 1e9)
+        r = circumradius(p[:-2], p[1:-1], p[2:])
         r_min = float(r.min())
         radii_by_cycle.append(r_min)
         if r_min >= min_radius:
             break
     print(f"joint relax/resample converged: radius={r_min:.2f} m after {cycle} cycle(s); "
           f"per-cycle radii={[round(x, 2) for x in radii_by_cycle]}")
+    assert r_min >= min_radius, (
+        f"joint curvature failed to converge after {cycle} cycles: "
+        f"r_min={r_min:.2f} m < min_radius={min_radius} m; "
+        f"per-cycle radii={[round(x, 2) for x in radii_by_cycle]}")
 
     # Split the relaxed blend back into "loop tail" (~JOINT*STEP m from anchor_start) and
     # connector, by arc length since resampling may change the point count slightly.
