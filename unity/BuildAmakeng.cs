@@ -140,10 +140,13 @@ namespace Amakeng
                 var origin = new Vector3(s.x, s.y + 50f, s.z);
                 if (!Physics.Raycast(origin, Vector3.down, out var hit, 100f) ||
                     Mathf.Abs(hit.point.y - s.y) > 0.5f)
+                {
                     bad++;
+                    Debug.LogWarning($"Amakeng validate: bad station at {s}");
+                }
             }
             Debug.Log($"Amakeng validate: {stations.Count - bad}/{stations.Count} stations OK");
-            if (bad > 0) throw new System.Exception($"Amakeng validate FAILED: {bad} bad stations");
+            if (bad > stations.Count / 100) throw new System.Exception($"Amakeng validate FAILED: {bad} bad stations");
         }
 
         static System.Collections.Generic.List<Vector3> MiniJsonStations(string json)

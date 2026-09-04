@@ -60,7 +60,7 @@ namespace Amakeng
 
             var cam = Camera.main ?? new GameObject("Main Camera").AddComponent<Camera>();
             cam.gameObject.tag = "MainCamera";
-            var fc = cam.gameObject.AddComponent<FollowCamera>();
+            var fc = cam.gameObject.GetComponent<FollowCamera>() ?? cam.gameObject.AddComponent<FollowCamera>();
             fc.target = root.transform;
 
             EditorSceneManager.MarkSceneDirty(root.scene);
