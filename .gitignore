@@ -10,6 +10,7 @@ raw/*.tif
 # Generated intermediates (recreate with scripts/run_generate.sh)
 work/
 logs/
+export/
 
 # OS noise
 Thumbs.db

@@ -52,15 +52,18 @@ namespace Amakeng
                 var vis = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
                 Object.DestroyImmediate(vis.GetComponent<Collider>());
                 vis.transform.SetParent(root.transform, false);
+                vis.transform.localPosition = pos[i];
                 vis.transform.localScale = new Vector3(0.7f, 0.12f, 0.7f);
                 vis.transform.localRotation = Quaternion.Euler(0, 0, 90);
                 vc.wheelVisuals[i] = vis.transform;
             }
             vc.fl = wheels[0]; vc.fr = wheels[1]; vc.rl = wheels[2]; vc.rr = wheels[3];
 
-            var cam = Camera.main ?? new GameObject("Main Camera").AddComponent<Camera>();
+            var cam = Camera.main;
+            if (cam == null) cam = new GameObject("Main Camera").AddComponent<Camera>();
             cam.gameObject.tag = "MainCamera";
-            var fc = cam.gameObject.GetComponent<FollowCamera>() ?? cam.gameObject.AddComponent<FollowCamera>();
+            var fc = cam.gameObject.GetComponent<FollowCamera>();
+            if (fc == null) fc = cam.gameObject.AddComponent<FollowCamera>();
             fc.target = root.transform;
 
             EditorSceneManager.MarkSceneDirty(root.scene);

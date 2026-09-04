@@ -161,7 +161,10 @@ namespace Amakeng
                 if (a < 0) break;
                 int b = json.IndexOf(']', a);
                 var parts = json.Substring(a + 1, b - a - 1).Split(',');
-                outp.Add(new Vector3(float.Parse(parts[0]), float.Parse(parts[1]), float.Parse(parts[2])));
+                outp.Add(new Vector3(
+                    float.Parse(parts[0], System.Globalization.CultureInfo.InvariantCulture),
+                    float.Parse(parts[1], System.Globalization.CultureInfo.InvariantCulture),
+                    float.Parse(parts[2], System.Globalization.CultureInfo.InvariantCulture)));
                 i = b + 1;
                 if (json[i] == ']') break;
             }
