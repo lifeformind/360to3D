@@ -15,9 +15,11 @@ def main():
             dest = gen / (f.name + ".bytes" if f.suffix == ".raw" else f.name)
             shutil.copy2(f, dest)
             print(f"  {f.name} -> {dest}")
+    RUNTIME = {"VehicleController.cs"}
     for f in (ROOT / "unity").glob("*.cs"):
-        shutil.copy2(f, ed / f.name)
-        print(f"  {f.name} -> {ed / f.name}")
+        dest_dir = (UNITY if f.name in RUNTIME else ed)
+        shutil.copy2(f, dest_dir / f.name)
+        print(f"  {f.name} -> {dest_dir / f.name}")
 
 
 if __name__ == "__main__":
