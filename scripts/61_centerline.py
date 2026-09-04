@@ -58,6 +58,20 @@ def main():
     tangents = np.gradient(loop, axis=0)
     tangents /= np.linalg.norm(tangents, axis=1, keepdims=True)
     conn = hermite_connector(loop[-1], tangents[-1], loop[0], tangents[0])
+
+    # Filter connector to avoid near-coincident stations (< 0.5 m apart)
+    kept_conn = []
+    last_pt = loop[-1]  # Start from loop end
+    for pt in conn:
+        if np.linalg.norm(pt - last_pt) >= 0.5:
+            kept_conn.append(pt)
+            last_pt = pt
+
+    # Drop trailing connector points within 0.5 m of loop[0]
+    while kept_conn and np.linalg.norm(kept_conn[-1] - loop[0]) < 0.5:
+        kept_conn.pop()
+
+    conn = np.array(kept_conn) if kept_conn else np.empty((0, 2))
     xy = np.vstack([loop, conn])
     n_loop = len(loop)
 

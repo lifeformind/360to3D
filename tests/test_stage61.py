@@ -23,6 +23,7 @@ def test_stationing_and_spacing(cl):
     xy = np.stack([arr(cl, "x"), arr(cl, "y")], axis=1)
     steps = np.linalg.norm(np.diff(xy, axis=0), axis=1)
     assert abs(steps.mean() - 1.0) < 0.05 and steps.max() < 1.5
+    assert steps.min() > 0.4
     assert 2900 < s[-1] < 3400  # ~3.0 km + 184 m connector
 
 
