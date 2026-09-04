@@ -7,8 +7,6 @@ import rasterio
 from scipy.interpolate import splev, splprep
 from scipy.signal import savgol_filter
 
-import geo
-
 ROOT = Path(__file__).resolve().parents[1]
 STEP = 1.0
 WIDTH = 10.0
@@ -65,7 +63,7 @@ def main():
 
     with rasterio.open(ROOT / "work" / "dtm_enu.tif") as ds:
         z_abs = np.array([v[0] for v in ds.sample(xy)], dtype=np.float64)
-    z_abs = savgol_filter(z_abs, window_length=151, polyorder=2)
+    z_abs = savgol_filter(z_abs, window_length=31, polyorder=2)
     z0 = float(z_abs[0])
     z = z_abs - z0
 

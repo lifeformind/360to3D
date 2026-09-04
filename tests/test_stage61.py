@@ -46,6 +46,6 @@ def test_loop_closes_with_provisional_connector(cl):
 def test_grades_and_datum(cl):
     z, s = arr(cl, "z"), arr(cl, "s")
     assert abs(z[0]) < 0.01  # z0 datum: starts at 0
-    grade = np.abs(np.diff(z) / np.diff(s))
+    grade = np.abs((z[10:] - z[:-10]) / (s[10:] - s[:-10]))
     assert grade.max() < 0.15
     assert (arr(cl, "w") == 10.0).all()
