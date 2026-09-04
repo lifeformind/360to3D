@@ -65,6 +65,7 @@ namespace Amakeng
             td.heightmapResolution = res;
             td.size = new Vector3(meta.size_x, meta.height_range, meta.size_z);
             td.SetHeights(0, 0, heights);
+            AssetDatabase.DeleteAsset("Assets/Amakeng/TerrainData.asset");
             AssetDatabase.CreateAsset(td, "Assets/Amakeng/TerrainData.asset");
 
             var go = Terrain.CreateTerrainGameObject(td);
@@ -83,11 +84,25 @@ namespace Amakeng
 
             var shader = Shader.Find("Universal Render Pipeline/Lit");
             var gravel = new Material(shader) { color = new Color(0.45f, 0.42f, 0.38f) };
-            gravel.mainTexture = MakeGravelTexture(false);
+            var gravelTex = MakeGravelTexture(false);
+            gravel.mainTexture = gravelTex;
             var prov = new Material(shader) { color = new Color(0.70f, 0.40f, 0.40f) };
-            prov.mainTexture = MakeGravelTexture(true);
+            var provTex = MakeGravelTexture(true);
+            prov.mainTexture = provTex;
+            AssetDatabase.DeleteAsset("Assets/Amakeng/Gravel.mat");
+            AssetDatabase.DeleteAsset("Assets/Amakeng/GravelProvisional.mat");
             AssetDatabase.CreateAsset(gravel, "Assets/Amakeng/Gravel.mat");
             AssetDatabase.CreateAsset(prov, "Assets/Amakeng/GravelProvisional.mat");
+            // Textures must be persisted as sub-assets or they are lost on save (fileID: 0).
+            gravelTex.name = "GravelTex";
+            AssetDatabase.AddObjectToAsset(gravelTex, gravel);
+            gravel.mainTexture = gravelTex;
+            gravel.SetTexture("_BaseMap", gravelTex);
+            provTex.name = "GravelProvisionalTex";
+            AssetDatabase.AddObjectToAsset(provTex, prov);
+            prov.mainTexture = provTex;
+            prov.SetTexture("_BaseMap", provTex);
+            AssetDatabase.SaveAssets();
 
             foreach (var mf in root.GetComponentsInChildren<MeshFilter>())
             {
