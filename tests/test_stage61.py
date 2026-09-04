@@ -47,5 +47,6 @@ def test_grades_and_datum(cl):
     z, s = arr(cl, "z"), arr(cl, "s")
     assert abs(z[0]) < 0.01  # z0 datum: starts at 0
     grade = np.abs((z[10:] - z[:-10]) / (s[10:] - s[:-10]))
-    assert grade.max() < 0.15
+    assert grade.max() < 0.25   # data-corruption guard; admits the real ~23.6% pitch at s≈1691
+    assert np.percentile(grade, 95) < 0.15   # overall track character per handoff (grades ~9-12%)
     assert (arr(cl, "w") == 10.0).all()
