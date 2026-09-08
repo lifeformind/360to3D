@@ -16,3 +16,8 @@ export/
 Thumbs.db
 .DS_Store
 .claude/settings.local.json
+
+# ArcGIS Pro mesh exports (40+ GB, local only)
+raw/MESH*/
+raw/*.slpk
+raw/OBJ*/
