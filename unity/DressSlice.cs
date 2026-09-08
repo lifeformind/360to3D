@@ -28,13 +28,36 @@ namespace Amakeng
         // We therefore scale each prototype at placement time by its OWN measured
         // baseline height so a target canopy height (foliage_cards h, 5-8m) comes out
         // close to correct regardless of the source prefab's native scale.
-        static readonly string[] TreePrefabPaths =
+        //
+        // Discovered via AssetDatabase.FindAssets, not hardcoded paths (see
+        // FindTreePrefab): (folder hint, name hint) pairs identify the 4 preferred
+        // prototypes chosen for scale/variety during discovery. The folder hint is
+        // needed because names repeat across folders with different models/scales
+        // (e.g. "Tree1.prefab" exists in both folder 0 and folder 4).
+        static readonly (string folderHint, string nameHint)[] TreePrefabHints =
         {
-            "Assets/TreePackVol.1/Prefabs/0/Tree1.prefab",
-            "Assets/TreePackVol.1/Prefabs/1/Tree.prefab",
-            "Assets/TreePackVol.1/Prefabs/4/Tree1.prefab",
-            "Assets/TreePackVol.1/Prefabs/Palm/Tree 1.prefab",
+            ("/0/", "Tree1"),
+            ("/1/", "Tree"),
+            ("/4/", "Tree1"),
+            ("/Palm/", "Tree 1"),
         };
+
+        const string TreePackRoot = "Assets/TreePackVol.1";
+
+        static GameObject FindTreePrefab(string[] allTreeGuids, string folderHint, string nameHint)
+        {
+            GameObject folderFallback = null;
+            foreach (var guid in allTreeGuids)
+            {
+                var path = AssetDatabase.GUIDToAssetPath(guid);
+                if (!path.Contains(folderHint)) continue;
+                if (Path.GetFileNameWithoutExtension(path) == nameHint)
+                    return AssetDatabase.LoadAssetAtPath<GameObject>(path);
+                if (folderFallback == null)
+                    folderFallback = AssetDatabase.LoadAssetAtPath<GameObject>(path);
+            }
+            return folderFallback; // any prefab in that folder, if the exact name moved
+        }
 
         [MenuItem("Amakeng/Dress Slice")]
         public static void Dress()
@@ -79,6 +102,28 @@ namespace Amakeng
             string path = Path.Combine(GenDir, "foliage_cards", "placements.json");
             if (!File.Exists(path)) return null;
             return JsonUtility.FromJson<PlacementsRoot>(File.ReadAllText(path));
+        }
+
+        // Discovers a prefab under a pack root via AssetDatabase.FindAssets (robust to the
+        // pack being reorganized), preferring an exact-name match and falling back to the
+        // first prefab whose name contains the fallback substring.
+        static GameObject FindPrefabPreferred(string root, string preferredName, string fallbackContains)
+        {
+            var guids = AssetDatabase.FindAssets("t:Prefab " + preferredName, new[] { root });
+            foreach (var guid in guids)
+            {
+                var path = AssetDatabase.GUIDToAssetPath(guid);
+                if (Path.GetFileNameWithoutExtension(path) == preferredName)
+                    return AssetDatabase.LoadAssetAtPath<GameObject>(path);
+            }
+            guids = AssetDatabase.FindAssets("t:Prefab", new[] { root });
+            foreach (var guid in guids)
+            {
+                var path = AssetDatabase.GUIDToAssetPath(guid);
+                if (Path.GetFileNameWithoutExtension(path).IndexOf(fallbackContains, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return AssetDatabase.LoadAssetAtPath<GameObject>(path);
+            }
+            return null;
         }
 
         // -------------------------------------------------------------------
@@ -139,12 +184,19 @@ namespace Amakeng
                 else if (raw[0] == 'v' && raw[1] == ' ')
                 {
                     var p = raw.Substring(2).Trim().Split(' ');
-                    // Adaptation: road_overlay.obj's X axis is mirrored relative to the
-                    // road_meta.json / road.obj / terrain frame. Verified by nearest-centreline
-                    // -station distance over a sample of overlay vertices: 564 m average as
-                    // exported vs 4.9 m average after negating X (consistent with the mesh's
-                    // 7 m lateral half-width) - so X is negated here to align the overlay to
-                    // the road ribbon.
+                    // road_overlay.obj is authored in the same right-handed OBJ convention as
+                    // road.obj (a known-good file in this project): Unity's standard model
+                    // importer converts right-handed -> left-handed on import by negating X AND
+                    // reversing triangle winding together, which is why road.obj (imported the
+                    // normal way in BuildAmakeng.BuildRoad) lines up correctly without any extra
+                    // handling. This method bypasses Unity's importer entirely (see BuildOverlay
+                    // header comment for why) and parses the raw OBJ text instead, so it must
+                    // replicate BOTH halves of that conversion itself: X is negated here, and
+                    // winding is reversed in the face-triangulation loop below. Negating X alone
+                    // was verified against road_meta.json centreline stations (nearest-station
+                    // distance: 564 m average raw vs 4.9 m average once negated, consistent with
+                    // the mesh's 7 m lateral half-width) before the winding half of the fix was
+                    // added.
                     positions.Add(new Vector3(-Pf(p[0]), Pf(p[1]), Pf(p[2])));
                 }
                 else if (raw[0] == 'v' && raw[1] == 't')
@@ -160,7 +212,14 @@ namespace Amakeng
                         idx[i] = int.Parse(toks[i].Split('/')[0], CultureInfo.InvariantCulture) - 1;
                     for (int i = 1; i < idx.Length - 1; i++) // fan-triangulate n-gons
                     {
-                        cur.Faces.Add(idx[0]); cur.Faces.Add(idx[i]); cur.Faces.Add(idx[i + 1]);
+                        // Winding is reversed here (idx[i+1] before idx[i]) to pair with the X
+                        // negation above: Unity's own OBJ importer applies a mirror + winding
+                        // flip together as a single right-handed -> left-handed conversion. This
+                        // manual parser only negates X, so it must also reverse winding itself or
+                        // normals come out inverted (RecalculateNormals follows winding) and the
+                        // overlay back-face-culls from driver angles under URP Lit's default Cull
+                        // Back.
+                        cur.Faces.Add(idx[0]); cur.Faces.Add(idx[i + 1]); cur.Faces.Add(idx[i]);
                     }
                 }
             }
@@ -236,8 +295,11 @@ namespace Amakeng
             // textures painted with DetailRenderMode.GrassBillboard/Grass - those legacy render
             // modes use the built-in grass shader, which does not render correctly under URP.
             // The prefab meshes already carry pack-native (post-conversion) URP materials.
-            var grassPrefab = AssetDatabase.LoadAssetAtPath<GameObject>("Assets/TerrainSampleAssets/Prefabs/Grass_A.prefab");
-            var fernPrefab = AssetDatabase.LoadAssetAtPath<GameObject>("Assets/TerrainSampleAssets/Prefabs/Fern_A.prefab");
+            // Discovered via AssetDatabase.FindAssets (see FindPrefabPreferred), not a hardcoded
+            // path, so this keeps working if TerrainSampleAssets is reorganized.
+            const string TerrainPackRoot = "Assets/TerrainSampleAssets";
+            var grassPrefab = FindPrefabPreferred(TerrainPackRoot, "Grass_A", "Grass");
+            var fernPrefab = FindPrefabPreferred(TerrainPackRoot, "Fern_A", "Fern");
             if (grassPrefab == null || fernPrefab == null)
             {
                 Debug.LogError("[DressSlice] PaintDetails: TerrainSampleAssets Grass_A/Fern_A prefabs missing; skipping.");
@@ -354,12 +416,14 @@ namespace Amakeng
 
             var protoList = new List<TreePrototype>();
             var baselineHeights = new List<float>();
-            foreach (var p in TreePrefabPaths)
+            var allTreeGuids = AssetDatabase.FindAssets("t:Prefab", new[] { TreePackRoot });
+            foreach (var hint in TreePrefabHints)
             {
-                var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(p);
+                var prefab = FindTreePrefab(allTreeGuids, hint.folderHint, hint.nameHint);
                 if (prefab == null)
                 {
-                    Debug.LogWarning("[DressSlice] PlantTrees: tree prefab missing: " + p);
+                    Debug.LogWarning("[DressSlice] PlantTrees: no tree prefab found for hint " +
+                        hint.folderHint + hint.nameHint);
                     continue;
                 }
                 protoList.Add(new TreePrototype { prefab = prefab });
