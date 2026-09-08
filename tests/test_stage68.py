@@ -34,6 +34,11 @@ def test_coverage_and_content(atlas):
     # road band should be mostly grey (low chroma) vs green verges outside band
     g_excess = band[..., 1].astype(int) - (band[..., 0].astype(int) + band[..., 2]) // 2
     assert np.median(g_excess) < 12
+    # road band should retain high-frequency gravel detail, not be smeared flat
+    # by over-aggressive streak inpainting (measured 13.26 on the fixed output;
+    # 2.0 leaves ample margin, so no recalibration needed - see fix report)
+    lap = np.abs(np.diff(band.mean(axis=2), axis=1))
+    assert lap.mean() > 2.0
 
 
 def test_report_exists(atlas):

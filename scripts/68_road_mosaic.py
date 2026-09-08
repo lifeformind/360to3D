@@ -61,14 +61,14 @@ def main():
                 continue
             s_vals = s_lo + (cols + 0.5) * TEXEL
             strip = cam67.sample_strip(img, cam, az0, interp, s_vals, lat)
+            # exposure gain: normalize each strip's own luminance to 128
+            # independently (near and far are different frames, so they need
+            # their own gain, not a shared one)
+            gain = 128.0 / max(20.0, strip.mean())
+            dest[:, cols] = np.clip(strip * gain, 0, 255)
             if D == D_NEAR:
-                # exposure gain: normalize road-band luminance to 128
-                gain = 128.0 / max(20.0, strip[..., :3].mean())
-                dest[:, cols] = np.clip(strip * gain, 0, 255)
                 have[cols] = True
                 strip_of[cols] = k
-            else:
-                dest[:, cols] = strip
 
     # --- registration: NCC pairwise (high-pass) + absolute road-centring ---
     CH = 20  # 1 m chunks
@@ -110,12 +110,20 @@ def main():
         out[:, sl] = np.roll(near[:, sl], shift, axis=0)
         outf[:, sl] = np.roll(far[:, sl], shift, axis=0)
 
-    # --- streak mask: near/far disagreement -> along-track median inpaint ---
-    diff = np.abs(out - outf).mean(axis=2)
-    mask = diff > 55
+    # --- streak mask: near/far disagreement (structural, exposure-invariant) ---
+    # -> along-track median inpaint
+    from scipy.ndimage import gaussian_filter
+    hp_n = out - gaussian_filter(out, sigma=(4, 4, 0))
+    hp_f = outf - gaussian_filter(outf, sigma=(4, 4, 0))
+    diff = np.abs(hp_n - hp_f).mean(axis=2)
+    thresh = np.percentile(diff, 97.0)
+    mask = diff > thresh
     if mask.any():
         from scipy.ndimage import binary_dilation, median_filter
-        mask = binary_dilation(mask, iterations=3)
+        mask = binary_dilation(mask, iterations=1)
+    print(f"streak fraction: {mask.mean():.1%}")
+    assert mask.mean() < 0.15, f"streak mask covers {mask.mean():.0%} - near/far disagreement is systematic, not object streaks"
+    if mask.any():
         med = median_filter(out, size=(1, 41, 1))
         out[mask] = med[mask]
 
