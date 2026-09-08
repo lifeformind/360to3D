@@ -1,6 +1,7 @@
 """Stage 67: per-frame camera poses + one-off az0/h_cam calibration (world-locked equirect)."""
 import argparse
 import json
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -73,43 +74,56 @@ def road_span(strip):
     """Detected (width_m, centre_m) from greenness; texel 0.1 m, lat -7..7."""
     g = strip[..., 1].astype(float) - (strip[..., 0].astype(float) + strip[..., 2]) / 2
     prof = g.mean(axis=1)
-    road = prof < np.percentile(prof, 45)
-    idx = np.where(road)[0]
-    if len(idx) < 10:
+    thresh = prof.min() + 0.35 * (prof.max() - prof.min())
+    mask = prof < thresh
+    # longest contiguous True run
+    best_a = best_b = a = None
+    for i, m in enumerate(mask):
+        if m and a is None: a = i
+        if (not m or i == len(mask) - 1) and a is not None:
+            b = i + (1 if m else 0)
+            if best_a is None or b - a > best_b - best_a: best_a, best_b = a, b
+            a = None
+    if best_a is None or (best_b - best_a) * 0.1 < 3.0:
         return None
-    return (len(idx) * 0.1, (idx.mean() + 0.5) * 0.1 - 7.0)
+    return ((best_b - best_a) * 0.1, (best_a + best_b) / 2 * 0.1 - 7.0)
 
 
 def calibrate(frames):
     picks = frames[:: max(1, len(frames) // 40)][:40]
     tmp = Path(tempfile.mkdtemp())
-    imgs = []
-    for f in picks:
-        out = tmp / f"c{f['v']}.jpg"
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", str(f["v"]),
-                        "-i", str(ROOT / "raw" / "3A_AMA North 360_.mp4"), "-frames:v", "1",
-                        "-vf", "scale=1920:960", str(out)], check=True)
-        imgs.append(np.asarray(Image.open(out)))
-    interp = make_interp()
-    lat = np.arange(-7.0, 7.0, 0.1) + 0.05
-    best = (1e9, 108.0, 3.0)
-    for az0 in np.arange(104, 113, 2.0):
-        for h in (2.5, 2.75, 3.0, 3.25, 3.5):
-            spans = []
-            for f, img in zip(picks, imgs):
-                cam = np.array([f["x"], f["y"], f["z"] + h])
-                s_strip = np.arange(f["s"] - D_BACK - 0.5, f["s"] - D_BACK + 0.5, 0.1)
-                sp = road_span(sample_strip(img, cam, az0, interp, s_strip, lat))
-                if sp:
-                    spans.append(sp)
-            if len(spans) < 20:
-                continue
-            widths = np.array([s[0] for s in spans])
-            centres = np.array([s[1] for s in spans])
-            score = abs(np.median(widths) - 10.0) + 0.05 * centres.std()
-            if score < best[0]:
-                best = (score, float(az0), float(h))
-    return best
+    try:
+        imgs = []
+        for f in picks:
+            out = tmp / f"c{f['v']}.jpg"
+            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", str(f["v"]),
+                            "-i", str(ROOT / "raw" / "3A_AMA North 360_.mp4"), "-frames:v", "1",
+                            "-vf", "scale=1920:960", str(out)], check=True)
+            imgs.append(np.asarray(Image.open(out)))
+        interp = make_interp()
+        lat = np.arange(-7.0, 7.0, 0.1) + 0.05
+        best = (1e9, 108.0, 3.0)
+        for az0 in np.arange(104, 113, 2.0):
+            for h in (2.0, 2.25, 2.5, 2.75, 3.0, 3.25, 3.5, 3.75, 4.0):
+                spans = []
+                for f, img in zip(picks, imgs):
+                    cam = np.array([f["x"], f["y"], f["z"] + h])
+                    s_strip = np.arange(f["s"] - D_BACK - 0.5, f["s"] - D_BACK + 0.5, 0.1)
+                    sp = road_span(sample_strip(img, cam, az0, interp, s_strip, lat))
+                    if sp:
+                        spans.append(sp)
+                if len(spans) < 20:
+                    continue
+                widths = np.array([s[0] for s in spans])
+                centres = np.array([s[1] for s in spans])
+                score = abs(np.median(widths) - 10.0) + 0.05 * centres.std()
+                if score < best[0]:
+                    best = (score, float(az0), float(h))
+        best_h = best[2]
+        assert best_h not in (2.0, 4.0), f"h_cam optimum at grid edge ({best_h}) - calibration signal suspect"
+        return best
+    finally:
+        shutil.rmtree(tmp)
 
 
 def main():
