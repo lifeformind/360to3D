@@ -14,7 +14,8 @@ def tiles():
 
 
 def test_tiles_produced(tiles):
-    assert 2 <= len(tiles) <= 50
+    # slice bbox +250 m margin spans 3x3..4x5 tiles of 200 m
+    assert 9 <= len(tiles) <= 20
 
 
 def test_clip_respected(tiles):
