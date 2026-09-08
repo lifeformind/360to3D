@@ -68,9 +68,34 @@ namespace Amakeng
             AssetDatabase.DeleteAsset("Assets/Amakeng/TerrainData.asset");
             AssetDatabase.CreateAsset(td, "Assets/Amakeng/TerrainData.asset");
 
+            const string layerPath = "Assets/Amakeng/GroundLayer.terrainlayer";
+            AssetDatabase.DeleteAsset(layerPath);
+            var groundTex = MakeGroundTexture();
+            var layer = new TerrainLayer { tileSize = new Vector2(24, 24) };
+            AssetDatabase.CreateAsset(layer, layerPath);
+            // Texture must be persisted as a sub-asset or it is lost on save (fileID: 0).
+            AssetDatabase.AddObjectToAsset(groundTex, layer);
+            layer.diffuseTexture = groundTex;
+            td.terrainLayers = new[] { layer };
+
             var go = Terrain.CreateTerrainGameObject(td);
             go.name = "[GEN] Terrain";
             go.transform.position = new Vector3(meta.origin_enu_x, meta.height_min, meta.origin_enu_y);
+        }
+
+        static Texture2D MakeGroundTexture()
+        {
+            var tex = new Texture2D(128, 128);
+            var rng = new System.Random(7);
+            for (int y = 0; y < 128; y++)
+                for (int x = 0; x < 128; x++)
+                {
+                    float v = 0.85f + (float)rng.NextDouble() * 0.3f;
+                    tex.SetPixel(x, y, new Color(0.24f * v, 0.34f * v, 0.16f * v));
+                }
+            tex.Apply();
+            tex.name = "GroundTex";
+            return tex;
         }
 
         static void BuildRoad()
