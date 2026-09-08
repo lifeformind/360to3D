@@ -6,6 +6,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -17,46 +18,79 @@ namespace Amakeng
     [Serializable] public class VergeMeta { public float xmin, ymax, px_m; public int width, height; }
     [Serializable] public class BarrierExtra { public float s, lat, len_m; }
     [Serializable] public class SliceExtras { public BarrierExtra barrier; }
+    [Serializable] public class CenterlineStation { public float s, x, y, z, tx, ty, w; public bool provisional; }
+    [Serializable] public class CenterlineRoot { public float z0, px_per_m; public CenterlineStation[] stations; }
 
     public static class DressSlice
     {
         const string GenDir = "Assets/Amakeng/Generated";
-
-        // Adaptation: TreePackVol.1 prefabs are wildly inconsistent in modelled scale
-        // (measured render bounds: folder0/Tree1 ~33m tall, folder1/Tree ~2.2m,
-        // folder4/Tree1 ~51m, Palm/Tree1 ~21m) - not a uniform "real metres" pack.
-        // We therefore scale each prototype at placement time by its OWN measured
-        // baseline height so a target canopy height (foliage_cards h, 5-8m) comes out
-        // close to correct regardless of the source prefab's native scale.
-        //
-        // Discovered via AssetDatabase.FindAssets, not hardcoded paths (see
-        // FindTreePrefab): (folder hint, name hint) pairs identify the 4 preferred
-        // prototypes chosen for scale/variety during discovery. The folder hint is
-        // needed because names repeat across folders with different models/scales
-        // (e.g. "Tree1.prefab" exists in both folder 0 and folder 4).
-        static readonly (string folderHint, string nameHint)[] TreePrefabHints =
-        {
-            ("/0/", "Tree1"),
-            ("/1/", "Tree"),
-            ("/4/", "Tree1"),
-            ("/Palm/", "Tree 1"),
-        };
-
+        const string TerrainPackRoot = "Assets/TerrainSampleAssets";
         const string TreePackRoot = "Assets/TreePackVol.1";
 
-        static GameObject FindTreePrefab(string[] allTreeGuids, string folderHint, string nameHint)
+        // Adaptation (review round 2): PlantTrees prefers Assets/TerrainSampleAssets (a
+        // Unity-6-era, URP-ready pack) over TreePackVol.1's Tree Creator prefabs, which are
+        // unconvertible (procedural "Hidden/Nature/Tree Creator ..." shaders, confirmed via
+        // an exhaustive scan of all 48 TreePackVol.1 prefabs - every one uses only Tree
+        // Creator shaders, zero exceptions). TerrainSampleAssets, however, has no prefab
+        // literally named "Tree" (also verified by FindAssets) - the tallest, most
+        // canopy-shaped items it has are these 4 bushes, which share the same URP
+        // "Shader Graphs/TerrainGrass" material family as the Grass_A/Fern_A detail
+        // prototypes already used in PaintDetails (so no magenta risk). Standing them in
+        // for "trees" also matches this project's own stated priority
+        // (CLAUDE.md: "Vegetation detail does not matter").
+        static readonly string[] PreferredTerrainTreeNames = { "Bush_A", "Bush_B", "BushDry_A", "BushDry_B" };
+        const int MaxTreePrototypes = 4;
+
+        static float MeasureHeight(GameObject prefab)
         {
-            GameObject folderFallback = null;
-            foreach (var guid in allTreeGuids)
+            var renderers = prefab.GetComponentsInChildren<Renderer>();
+            if (renderers.Length == 0) return 6f;
+            var b = renderers[0].bounds;
+            foreach (var r in renderers) b.Encapsulate(r.bounds);
+            return Mathf.Max(0.5f, b.size.y);
+        }
+
+        static bool UsesUnconvertibleShader(GameObject prefab)
+        {
+            var shaders = prefab.GetComponentsInChildren<Renderer>()
+                .SelectMany(r => r.sharedMaterials).Where(m => m != null).Select(m => m.shader.name);
+            return shaders.Any(s =>
+                s.IndexOf("Tree Creator", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                s.IndexOf("SpeedTree", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                s.IndexOf("Soft Occlusion", StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        // Discovers up to MaxTreePrototypes (prefab, measuredHeight) pairs: prefers
+        // TerrainSampleAssets (see PreferredTerrainTreeNames adaptation note above), falls
+        // back to any TreePackVol.1 prefab whose renderers do NOT use a Tree Creator /
+        // SpeedTree / Soft-Occlusion shader (i.e. would actually render under URP).
+        static List<(GameObject prefab, float baseline)> DiscoverTreePrototypes()
+        {
+            var chosen = new List<(GameObject, float)>();
+
+            var terrainGuids = AssetDatabase.FindAssets("t:Prefab", new[] { TerrainPackRoot });
+            foreach (var name in PreferredTerrainTreeNames)
             {
-                var path = AssetDatabase.GUIDToAssetPath(guid);
-                if (!path.Contains(folderHint)) continue;
-                if (Path.GetFileNameWithoutExtension(path) == nameHint)
-                    return AssetDatabase.LoadAssetAtPath<GameObject>(path);
-                if (folderFallback == null)
-                    folderFallback = AssetDatabase.LoadAssetAtPath<GameObject>(path);
+                if (chosen.Count >= MaxTreePrototypes) break;
+                var guid = terrainGuids.FirstOrDefault(g =>
+                    Path.GetFileNameWithoutExtension(AssetDatabase.GUIDToAssetPath(g)) == name);
+                if (guid == null) continue;
+                var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(AssetDatabase.GUIDToAssetPath(guid));
+                if (prefab != null) chosen.Add((prefab, MeasureHeight(prefab)));
             }
-            return folderFallback; // any prefab in that folder, if the exact name moved
+
+            if (chosen.Count < MaxTreePrototypes)
+            {
+                var treeGuids = AssetDatabase.FindAssets("t:Prefab", new[] { TreePackRoot });
+                foreach (var guid in treeGuids)
+                {
+                    if (chosen.Count >= MaxTreePrototypes) break;
+                    var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(AssetDatabase.GUIDToAssetPath(guid));
+                    if (prefab == null || UsesUnconvertibleShader(prefab)) continue;
+                    chosen.Add((prefab, MeasureHeight(prefab)));
+                }
+            }
+            return chosen;
         }
 
         [MenuItem("Amakeng/Dress Slice")]
@@ -403,8 +437,24 @@ namespace Amakeng
         // -------------------------------------------------------------------
         // 4. Trees (foliage_cards placements with h > 5 m).
         // -------------------------------------------------------------------
+        // Adaptation (review round 2, item 2 follow-up): placed as ordinary instantiated
+        // GameObjects under [GEN] Slice/Trees, NOT as Unity's built-in Terrain tree
+        // prototypes/instances (terrainData.treePrototypes / SetTreeInstances). Unity's
+        // terrain tree renderer requires a Tree-Creator/SpeedTree/Soft-Occlusion-family
+        // shader for correct billboarding and lighting - assigning the round-2 fix's
+        // TerrainSampleAssets bushes (Shader Graphs/TerrainGrass) as tree PROTOTYPES
+        // triggers exactly this in-editor warning: "The tree Bush_A must use the Nature/
+        // Soft Occlusion shader. Otherwise billboarding/lighting will not work correctly."
+        // That mismatch between the terrain tree renderer's expectations and any
+        // URP-native, non-Tree-Creator shader is almost certainly the real source of the
+        // "floating dark billboard blobs" reported alongside the magenta trees - Unity's
+        // terrain billboard LOD system rendering non-compliant materials incorrectly.
+        // Plain GameObjects (used here, and already used for backdrop/cards) have no such
+        // requirement and render normally under URP.
         static void PlantTrees()
         {
+            var treesRoot = ReplaceChild(GetSliceRoot(), "Trees");
+
             var terrGo = GameObject.Find("[GEN] Terrain");
             if (terrGo == null)
             {
@@ -412,78 +462,57 @@ namespace Amakeng
                 return;
             }
             var terrain = terrGo.GetComponent<Terrain>();
-            var td = terrain.terrainData;
+            // Idempotency: clear any Terrain tree prototypes/instances left over from
+            // before this fix (PlantTrees used to populate terrainData.treePrototypes /
+            // SetTreeInstances; it no longer does - see the adaptation note above).
+            // Instances must be cleared BEFORE prototypes, or Unity logs "Tree removed:
+            // invalid prototype N" while the (now-empty) prototype list briefly can't
+            // satisfy the still-present old instances' prototypeIndex references.
+            terrain.terrainData.SetTreeInstances(new TreeInstance[0], true);
+            terrain.terrainData.treePrototypes = new TreePrototype[0];
 
-            var protoList = new List<TreePrototype>();
-            var baselineHeights = new List<float>();
-            var allTreeGuids = AssetDatabase.FindAssets("t:Prefab", new[] { TreePackRoot });
-            foreach (var hint in TreePrefabHints)
+            var discovered = DiscoverTreePrototypes();
+            if (discovered.Count == 0)
             {
-                var prefab = FindTreePrefab(allTreeGuids, hint.folderHint, hint.nameHint);
-                if (prefab == null)
-                {
-                    Debug.LogWarning("[DressSlice] PlantTrees: no tree prefab found for hint " +
-                        hint.folderHint + hint.nameHint);
-                    continue;
-                }
-                protoList.Add(new TreePrototype { prefab = prefab });
-                float baseline = 6f;
-                var renderers = prefab.GetComponentsInChildren<Renderer>();
-                if (renderers.Length > 0)
-                {
-                    var b = renderers[0].bounds;
-                    foreach (var r in renderers) b.Encapsulate(r.bounds);
-                    baseline = Mathf.Max(0.5f, b.size.y);
-                }
-                baselineHeights.Add(baseline);
-            }
-            if (protoList.Count == 0)
-            {
-                Debug.LogError("[DressSlice] PlantTrees: no tree prototypes found; skipping.");
+                Debug.LogError("[DressSlice] PlantTrees: no tree prototypes found (checked " +
+                    TerrainPackRoot + " and " + TreePackRoot + "); skipping.");
                 return;
             }
-            td.treePrototypes = protoList.ToArray();
+            if (discovered.Count < MaxTreePrototypes)
+                Debug.LogWarning("[DressSlice] PlantTrees: only " + discovered.Count + "/" + MaxTreePrototypes +
+                    " tree prototypes available.");
+            Debug.Log("[DressSlice] PlantTrees: prototypes = " +
+                string.Join(", ", discovered.Select(d => d.prefab.name)));
 
             var placements = LoadPlacements();
             if (placements == null || placements.cards == null)
             {
                 Debug.LogWarning("[DressSlice] PlantTrees: foliage_cards/placements.json missing; no trees placed.");
-                td.SetTreeInstances(Array.Empty<TreeInstance>(), true);
                 return;
             }
 
-            Vector3 terrPos = terrGo.transform.position;
-            Vector3 size = td.size;
             var rng = new System.Random(20260908);
-            var instances = new List<TreeInstance>();
             int protoCursor = 0;
+            int n = 0;
             foreach (var c in placements.cards)
             {
                 if (c.h <= 5f) continue; // tall placements only; h<=5 handled by PlaceCards as quads
                 float worldY = terrain.SampleHeight(new Vector3(c.x, 0f, c.y));
-                float nx = (c.x - terrPos.x) / size.x;
-                float nz = (c.y - terrPos.z) / size.z;
-                float ny = (worldY - terrPos.y) / size.y;
-                if (nx < 0f || nx > 1f || nz < 0f || nz > 1f) continue;
 
-                int protoIdx = protoCursor % protoList.Count;
+                var (prefab, baseline) = discovered[protoCursor % discovered.Count];
                 protoCursor++;
                 float jitter = 0.9f + (float)rng.NextDouble() * 0.2f;
-                float scale = Mathf.Clamp(c.h / baselineHeights[protoIdx], 0.05f, 6f) * jitter;
+                float scale = Mathf.Clamp(c.h / baseline, 0.05f, 6f) * jitter;
 
-                instances.Add(new TreeInstance
-                {
-                    position = new Vector3(nx, ny, nz),
-                    prototypeIndex = protoIdx,
-                    widthScale = scale,
-                    heightScale = scale,
-                    rotation = c.yaw_deg * Mathf.Deg2Rad,
-                    color = Color.white,
-                    lightmapColor = Color.white,
-                });
+                var inst = (GameObject)PrefabUtility.InstantiatePrefab(prefab);
+                inst.name = prefab.name + "_" + n;
+                inst.transform.SetParent(treesRoot.transform, false);
+                inst.transform.position = new Vector3(c.x, worldY, c.y);
+                inst.transform.rotation = Quaternion.Euler(0f, c.yaw_deg, 0f);
+                inst.transform.localScale = Vector3.one * scale;
+                n++;
             }
-            td.SetTreeInstances(instances.ToArray(), true);
-            Debug.Log("[DressSlice] PlantTrees: " + instances.Count + " tree instance(s) from " + protoList.Count + " prototype(s).");
+            Debug.Log("[DressSlice] PlantTrees: " + n + " tree instance(s) from " + discovered.Count + " prototype(s).");
         }
 
         // -------------------------------------------------------------------
@@ -665,8 +694,60 @@ namespace Amakeng
             }
             // "Left" of the direction of travel, in the horizontal (x,z) plane: rotating the
             // tangent 90 deg counter-clockwise as seen from above (Unity x=East, z=North).
+            // Derivation (review round 2, item 3 - rechecked from the ENU convention and
+            // verified two independent ways, see the console cross-check logged below):
+            // ENU is right-handed (x=East, y=North, z=Up); for a person facing ENU tangent
+            // (tx,ty)=(0,1) (due north), their LEFT hand points west = (-1,0) - a physical/
+            // geographic fact, not a convention choice. Rotating (tx,ty) by +90 deg CCW
+            // (standard math rotation, (x,y)->(-y,x)) gives (-ty,tx); at (0,1) that's (-1,0)
+            // = west, matching. So ENU left = (-ty, tx). road_meta.json's stations_unity use
+            // the documented identity ENU->Unity axis mapping (unity_x=enu_x, unity_z=enu_y,
+            // no sign flip - confirmed exactly: station 0 in road_meta.json, (0.179,1.079),
+            // equals centerline.json's s=0 ENU (x,y) verbatim), so the same (-ty,tx) rotation
+            // applies directly to the Unity-space tangent's (x,z) components: left =
+            // (-tangent.z, 0, tangent.x). Independently confirmed against Unity's own
+            // Quaternion.LookRotation(tangent, up) "left" (-transform.right): both give
+            // (0,0,1) for forward=+x and (-1,0,0) for forward=+z.
             var left = new Vector3(-tangent.z, 0f, tangent.x).normalized;
             var xz = centre + left * extras.barrier.lat;
+
+            // Independent numeric proof: recompute the expected Unity (x,z) directly from
+            // the ENU ground-truth centreline (work/centerline.json, synced to
+            // Generated/centerline.json), which carries an explicit per-station tangent
+            // (tx,ty) rather than one derived by finite-differencing road_meta.json's
+            // coarser ~5 m station spacing. Must land within 2 m (per review round 2).
+            string centerlinePath = Path.Combine(GenDir, "centerline.json");
+            if (File.Exists(centerlinePath))
+            {
+                var cl = JsonUtility.FromJson<CenterlineRoot>(File.ReadAllText(centerlinePath));
+                if (cl != null && cl.stations != null && cl.stations.Length > 0)
+                {
+                    CenterlineStation nearest = cl.stations[0];
+                    float bestDs = Mathf.Abs(nearest.s - extras.barrier.s);
+                    foreach (var st in cl.stations)
+                    {
+                        float ds = Mathf.Abs(st.s - extras.barrier.s);
+                        if (ds < bestDs) { bestDs = ds; nearest = st; }
+                    }
+                    // ENU left = (-ty, tx); ENU->Unity horizontal is the identity axis mapping.
+                    float expectedX = nearest.x + extras.barrier.lat * (-nearest.ty);
+                    float expectedZ = nearest.y + extras.barrier.lat * nearest.tx;
+                    float mismatch = Vector2.Distance(new Vector2(xz.x, xz.z), new Vector2(expectedX, expectedZ));
+                    Debug.Log("[DressSlice] PlaceBarrier ENU check: road_meta-derived unity(x,z)=(" +
+                        xz.x.ToString("F3") + "," + xz.z.ToString("F3") + ")  ENU-ground-truth unity(x,z)=(" +
+                        expectedX.ToString("F3") + "," + expectedZ.ToString("F3") + ")  mismatch=" +
+                        mismatch.ToString("F3") + " m (tolerance 2 m, nearest centreline station s=" +
+                        nearest.s.ToString("F1") + ")");
+                    if (mismatch > 2f)
+                        Debug.LogError("[DressSlice] PlaceBarrier: ENU ground-truth check FAILED - mismatch " +
+                            mismatch.ToString("F3") + " m exceeds 2 m tolerance.");
+                }
+            }
+            else
+            {
+                Debug.LogWarning("[DressSlice] PlaceBarrier: centerline.json not found (run 70_sync_unity.py); " +
+                    "skipping ENU ground-truth check.");
+            }
 
             var terrGo = GameObject.Find("[GEN] Terrain");
             float y = xz.y;

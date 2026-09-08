@@ -27,6 +27,14 @@ def main():
     gen.mkdir(parents=True, exist_ok=True)
     ed.mkdir(parents=True, exist_ok=True)
     _copy_export_tree(ROOT / "export", gen)
+    # DressSlice.PlaceBarrier cross-checks its road_meta.json-derived barrier position
+    # against the ENU ground-truth centreline (station + tangent) at runtime, so the
+    # stage-69 intermediate centreline is also synced (not part of export/ proper).
+    centerline = ROOT / "work" / "centerline.json"
+    if centerline.exists():
+        dest = gen / "centerline.json"
+        shutil.copy2(centerline, dest)
+        print(f"  work/centerline.json -> {dest}")
     RUNTIME = {"VehicleController.cs"}
     for f in (ROOT / "unity").glob("*.cs"):
         dest_dir = (UNITY if f.name in RUNTIME else ed)

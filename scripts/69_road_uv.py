@@ -16,7 +16,7 @@ def main():
     gutter = (lat_px - road_px) // 2
     cl = json.loads((ROOT / "work" / "centerline.json").read_text())
     sts = [st for st in cl["stations"] if not st["provisional"]]
-    lats = np.array([-7.0, -5.0, -2.0, 2.0, 5.0, 7.0])
+    lats = np.array([-7.0, -5.0, -2.0, 0.0, 2.0, 5.0, 7.0])
 
     lines = []
     vbase = 1
