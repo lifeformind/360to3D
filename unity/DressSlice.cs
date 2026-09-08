@@ -102,6 +102,7 @@ namespace Amakeng
             ConvertPackMaterials();
             BuildOverlay();
             PaintDetails();
+            FixGroundMaterial();
             PlantTrees();
             PlaceCards();
             ImportBackdrop();
@@ -435,6 +436,122 @@ namespace Amakeng
         }
 
         // -------------------------------------------------------------------
+        // Ground material fix-up (review round 3, item 2): the terrain read as glossy
+        // "minty waves" - Part A's procedural GroundLayer had non-zero default
+        // smoothness/specular (URP Lit's defaults) giving it a wet/plastic sheen, and its
+        // base colour (0.24, 0.34, 0.16) skewed brighter/greener than the footage's matte
+        // verge tones. This is the Part A TerrainLayer set up in BuildAmakeng.BuildTerrain,
+        // not something DressSlice normally owns, but the fix is applied here (in-place, on
+        // the already-built [GEN] Terrain) rather than editing BuildAmakeng.cs, per review
+        // instruction. Idempotent: rebuilds the same 128x128 texture with the same noise
+        // algorithm/seed each run rather than editing pixels in place, so it doesn't depend
+        // on the existing sub-asset texture still being CPU-readable.
+        // -------------------------------------------------------------------
+        static void FixGroundMaterial()
+        {
+            var terrGo = GameObject.Find("[GEN] Terrain");
+            if (terrGo == null)
+            {
+                Debug.LogError("[DressSlice] FixGroundMaterial: [GEN] Terrain not found; run Amakeng/Build Scene first.");
+                return;
+            }
+            var terrain = terrGo.GetComponent<Terrain>();
+            var td = terrain.terrainData;
+
+            var newTex = new Texture2D(128, 128, TextureFormat.RGBA32, false) { name = "GroundTex" };
+            var rng = new System.Random(7); // same seed/algorithm as BuildAmakeng.MakeGroundTexture
+            var pixels = new Color[128 * 128];
+            for (int i = 0; i < pixels.Length; i++)
+            {
+                float v = 0.85f + (float)rng.NextDouble() * 0.3f;
+                pixels[i] = new Color(0.22f * v, 0.30f * v, 0.16f * v); // darker matte verge tone
+            }
+            newTex.SetPixels(pixels);
+            newTex.Apply();
+
+            // Fully replace the TerrainLayer asset (delete + recreate), mirroring
+            // BuildAmakeng.BuildTerrain's own layer-creation pattern, rather than mutating
+            // the existing TerrainLayer object's fields in place - simpler to reason about
+            // and equally idempotent.
+            const string layerPath = "Assets/Amakeng/GroundLayer.terrainlayer";
+            AssetDatabase.DeleteAsset(layerPath);
+            var layer = new TerrainLayer
+            {
+                tileSize = new Vector2(24, 24),
+                specular = Color.black,
+                smoothness = 0f,
+                metallic = 0f,
+            };
+            AssetDatabase.CreateAsset(layer, layerPath);
+            AssetDatabase.AddObjectToAsset(newTex, layer);
+            layer.diffuseTexture = newTex;
+            td.terrainLayers = new[] { layer };
+            terrain.Flush();
+
+            // Adaptation - the actual source of the "glossy minty wave" sheen: with
+            // specular/smoothness/metallic all zeroed, a strong sheen persisted regardless
+            // (confirmed by re-texturing the terrain solid red as a diagnostic - the same
+            // bright highlight streaks showed up on red too, proving they weren't a colour
+            // problem). Isolated by toggling RenderSettings.reflectionIntensity: at its
+            // default of 1, URP's skybox-based environment reflection was contributing a
+            // strong specular-like sheen to the terrain that a Lit material's own
+            // smoothness=0 does not fully suppress (residual grazing-angle Fresnel/skybox
+            // contribution); zeroing it eliminates the sheen completely in a side-by-side
+            // capture. This is a global render setting, not terrain-specific, but it's the
+            // fix that actually delivers "matte ground, not liquid" and this is the step
+            // that establishes ground appearance, so it's set here.
+            RenderSettings.reflectionIntensity = 0f;
+
+            AssetDatabase.SaveAssets();
+            Debug.Log("[DressSlice] FixGroundMaterial: TerrainLayer set matte (smoothness=0, specular=black, " +
+                "metallic=0), ground colour darkened to ~(0.22,0.30,0.16), RenderSettings.reflectionIntensity=0 " +
+                "(kills residual skybox-reflection sheen).");
+        }
+
+        // Adaptation (review round 3, item 3): TerrainSampleAssets' bush shader graph
+        // ("Shader Graphs/TerrainGrass") exposes no discoverable/settable base-colour tint
+        // property - Unity's generic Material.color/.mainTexture (which normally resolve a
+        // shader's [MainColor]/[MainTexture]-tagged properties) both error with "doesn't
+        // have a colour/texture property" for this shader, and none of its ~90 exposed
+        // properties (dumped via ShaderUtil) is a plain base-colour multiplier. Its base
+        // colour texture IS exposed, just under an auto-generated Shader-Graph property
+        // name ("Texture2D_E1B0D043"), found by probing each TexEnv slot and matching the
+        // returned texture against the prefab's own "<Name>_BaseColor" asset. Rather than
+        // fight that shader, instantiated bushes get a fresh, ordinary URP/Lit material
+        // using the same base-colour texture with _BaseColor multiplied toward
+        // (0.5, 0.75, 0.45) - guaranteed to work (URP/Lit is already used throughout this
+        // file) at the cost of losing the pack's wind animation on these background props,
+        // an acceptable trade-off given CLAUDE.md's own priority ("Vegetation detail does
+        // not matter"). Applied uniformly to all instantiated bushes (not just the two
+        // "Dry" variants) because the pack only has 4 bush-like items total (2 green + 2
+        // dry) and all 4 are needed to reach the requested prototype count.
+        const string BushBaseColorTexProperty = "Texture2D_E1B0D043";
+
+        static Material MakeGreenTintedBushMaterial(GameObject prefab)
+        {
+            var srcRenderer = prefab.GetComponentInChildren<Renderer>();
+            var srcMat = srcRenderer != null ? srcRenderer.sharedMaterial : null;
+            Texture baseTex = null;
+            if (srcMat != null && srcMat.HasProperty(BushBaseColorTexProperty))
+                baseTex = srcMat.GetTexture(BushBaseColorTexProperty);
+            else
+                Debug.LogWarning("[DressSlice] MakeGreenTintedBushMaterial: " + prefab.name +
+                    "'s material has no '" + BushBaseColorTexProperty + "' property; using a flat tint.");
+
+            var shader = Shader.Find("Universal Render Pipeline/Lit");
+            var mat = new Material(shader) { name = "TreeTint_" + prefab.name };
+            if (baseTex != null) { mat.SetTexture("_BaseMap", baseTex); mat.mainTexture = baseTex; }
+            mat.SetColor("_BaseColor", new Color(0.5f, 0.75f, 0.45f, 1f));
+            mat.SetFloat("_Cull", (float)UnityEngine.Rendering.CullMode.Off); // foliage cards within the mesh
+            mat.SetFloat("_Smoothness", 0.15f);
+
+            string matPath = "Assets/Amakeng/TreeTint_" + prefab.name + ".mat";
+            AssetDatabase.DeleteAsset(matPath);
+            AssetDatabase.CreateAsset(mat, matPath);
+            return AssetDatabase.LoadAssetAtPath<Material>(matPath);
+        }
+
+        // -------------------------------------------------------------------
         // 4. Trees (foliage_cards placements with h > 5 m).
         // -------------------------------------------------------------------
         // Adaptation (review round 2, item 2 follow-up): placed as ordinary instantiated
@@ -484,6 +601,10 @@ namespace Amakeng
             Debug.Log("[DressSlice] PlantTrees: prototypes = " +
                 string.Join(", ", discovered.Select(d => d.prefab.name)));
 
+            // Green-tint material per prototype (review round 3, item 3 - see the
+            // adaptation note above MakeGreenTintedBushMaterial).
+            var tintMats = discovered.Select(d => MakeGreenTintedBushMaterial(d.prefab)).ToList();
+
             var placements = LoadPlacements();
             if (placements == null || placements.cards == null)
             {
@@ -499,8 +620,10 @@ namespace Amakeng
                 if (c.h <= 5f) continue; // tall placements only; h<=5 handled by PlaceCards as quads
                 float worldY = terrain.SampleHeight(new Vector3(c.x, 0f, c.y));
 
-                var (prefab, baseline) = discovered[protoCursor % discovered.Count];
+                int protoIdx = protoCursor % discovered.Count;
                 protoCursor++;
+                var prefab = discovered[protoIdx].prefab;
+                float baseline = discovered[protoIdx].baseline;
                 float jitter = 0.9f + (float)rng.NextDouble() * 0.2f;
                 float scale = Mathf.Clamp(c.h / baseline, 0.05f, 6f) * jitter;
 
@@ -510,6 +633,8 @@ namespace Amakeng
                 inst.transform.position = new Vector3(c.x, worldY, c.y);
                 inst.transform.rotation = Quaternion.Euler(0f, c.yaw_deg, 0f);
                 inst.transform.localScale = Vector3.one * scale;
+                foreach (var r in inst.GetComponentsInChildren<Renderer>())
+                    r.sharedMaterial = tintMats[protoIdx];
                 n++;
             }
             Debug.Log("[DressSlice] PlantTrees: " + n + " tree instance(s) from " + discovered.Count + " prototype(s).");
@@ -551,12 +676,22 @@ namespace Amakeng
                     var m = new Material(shader) { name = "Card_" + Path.GetFileNameWithoutExtension(c.img) };
                     if (tex != null) { m.SetTexture("_BaseMap", tex); m.mainTexture = tex; }
                     else Debug.LogWarning("[DressSlice] PlaceCards: card texture not found at " + imgPath);
-                    m.SetFloat("_Surface", 0f);   // opaque
-                    m.SetFloat("_AlphaClip", 1f);
-                    m.SetFloat("_Cutoff", 0.3f);
-                    m.EnableKeyword("_ALPHATEST_ON");
+                    // Review round 3: alpha CLIP (hard cutoff at _Cutoff) was cutting the
+                    // card PNGs' feathered edge into a hard-edged circle. Switch to alpha
+                    // BLENDING so the soft feather actually fades: Transparent surface,
+                    // standard SrcAlpha/OneMinusSrcAlpha blend, no depth write, Transparent
+                    // queue. Cull stays off (two-sided).
+                    m.SetFloat("_Surface", 1f); // Transparent
+                    m.SetFloat("_Blend", 0f);   // Alpha
+                    m.SetFloat("_SrcBlend", (float)UnityEngine.Rendering.BlendMode.SrcAlpha);
+                    m.SetFloat("_DstBlend", (float)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
+                    m.SetFloat("_ZWrite", 0f);
+                    m.SetFloat("_AlphaClip", 0f);
+                    m.DisableKeyword("_ALPHATEST_ON");
+                    m.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
+                    m.SetOverrideTag("RenderType", "Transparent");
                     m.SetFloat("_Cull", (float)UnityEngine.Rendering.CullMode.Off); // two-sided
-                    m.renderQueue = (int)UnityEngine.Rendering.RenderQueue.AlphaTest;
+                    m.renderQueue = (int)UnityEngine.Rendering.RenderQueue.Transparent;
 
                     string matPath = "Assets/Amakeng/CardMat_" + Path.GetFileNameWithoutExtension(c.img) + ".mat";
                     AssetDatabase.DeleteAsset(matPath);
