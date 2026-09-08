@@ -177,14 +177,11 @@ namespace Amakeng
                 Debug.LogWarning("[DressSlice] ConvertPackMaterials: URP converter unavailable or failed (" +
                     e.Message + "). Convert pack materials manually via Window > Rendering > Render Pipeline Converter.");
             }
-            // Adaptation/note: TreePackVol.1 prefabs use the legacy procedural "Hidden/Nature/Tree
-            // Creator Bark/Leaves (Fast) Optimized" shaders (Tree Creator engine), which the
-            // Built-in->URP material converter does not remap (it targets Standard/legacy-diffuse
-            // materials). Trees may still render magenta/pink after this step; fix manually via
-            // Window > Rendering > Render Pipeline Converter, or by reassigning tree materials.
-            Debug.LogWarning("[DressSlice] ConvertPackMaterials: TreePackVol.1 uses legacy Tree Creator " +
-                "shaders not covered by the URP converter - trees may still appear magenta; see Window > " +
-                "Rendering > Render Pipeline Converter to fix manually.");
+            // Note: earlier rounds logged a "TreePackVol.1 trees may appear magenta" warning
+            // here. As of review round 2, PlantTrees no longer places any TreePackVol.1 Tree
+            // Creator prefab (it prefers TerrainSampleAssets bushes and only falls back to
+            // non-Tree-Creator-shader TreePackVol.1 prefabs, of which there are none in this
+            // pack), so that warning is stale and has been removed.
         }
 
         // -------------------------------------------------------------------
@@ -296,6 +293,19 @@ namespace Amakeng
 
                 string tileNum = g.Name.Length >= 2 ? g.Name.Substring(g.Name.Length - 2) : "";
                 string texPath = GenDir + "/road_albedo/tile_" + tileNum + ".png";
+                // Final review: these 4096x512 mosaic tiles were importing at Unity's
+                // default maxTextureSize (2048), halving them to 10 cm/px on the road
+                // instead of the authored 5 cm/px. Force full resolution + uncompressed +
+                // sRGB before loading, same pattern as PaintDetails' density.png override.
+                var timp = AssetImporter.GetAtPath(texPath) as TextureImporter;
+                if (timp != null && (timp.maxTextureSize < 4096 ||
+                    timp.textureCompression != TextureImporterCompression.Uncompressed || !timp.sRGBTexture))
+                {
+                    timp.maxTextureSize = 4096;
+                    timp.textureCompression = TextureImporterCompression.Uncompressed;
+                    timp.sRGBTexture = true;
+                    timp.SaveAndReimport();
+                }
                 var tex = AssetDatabase.LoadAssetAtPath<Texture2D>(texPath);
 
                 string matPath = "Assets/Amakeng/OverlayTile" + tileNum + ".mat";

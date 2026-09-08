@@ -33,7 +33,10 @@ def main():
                 ex = st["x"] + nx * l
                 ey = st["y"] + ny * l
                 ez = st["z"] + LIFT - CROWN * abs(l)
-                v = (gutter + (l + half) / (2 * half) * road_px) / lat_px
+                # Stage 68 writes the mosaic top-origin (lat=-half at PNG row `gutter`,
+                # counted from the top), but Unity samples texture v bottom-origin - flip
+                # here so v addresses the same row Unity will actually read.
+                v = 1.0 - (gutter + (l + half) / (2 * half) * road_px) / lat_px
                 lines.append(f"v {-ex:.3f} {ez:.3f} {ey:.3f}")
                 lines.append(f"vt {u:.5f} {v:.5f}")
                 nv += 1

@@ -1,3 +1,4 @@
+import json
 import subprocess
 import numpy as np
 import pytest
@@ -37,3 +38,21 @@ def test_overlay_above_road(obj):
     verts, _, _ = obj
     # centre-line vertices sit ~0.02 above station z; sanity: y within plausible band
     assert -10 < verts[:, 1].min() and verts[:, 1].max() < 25
+
+
+def test_v_row_convention():
+    """Pin the v bottom-origin flip permanently: stage 68 writes lat=-7 mosaic content at
+    PNG row `gutter` (=116) counted from the TOP, but Unity samples texture v bottom-origin
+    (v=0 = bottom row). So the v this script emits for a given lat must, once read back
+    bottom-origin (image row from top = (1 - v) * lat_px), land on the row stage 68 actually
+    wrote that lat's content to - not the mirror-image row on the other side of the road.
+    """
+    meta = json.loads((ROOT / "export" / "road_albedo" / "atlas_meta.json").read_text())
+    half, lat_px, road_px = meta["lateral_half_m"], meta["lateral_px"], meta["road_px"]
+    gutter = (lat_px - road_px) // 2
+
+    def v_for(l):
+        return 1.0 - (gutter + (l + half) / (2 * half) * road_px) / lat_px
+
+    assert abs((1 - v_for(-7.0)) * lat_px - 116) < 1.0
+    assert abs((1 - v_for(7.0)) * lat_px - 396) < 1.0
