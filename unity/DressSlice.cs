@@ -718,7 +718,9 @@ namespace Amakeng
             for (int i = 0; i < placements.cards.Length; i++)
             {
                 var c = placements.cards[i];
-                float worldY = terrain.SampleHeight(new Vector3(c.x, 0f, c.y));
+                // SampleHeight is relative to the terrain object; add its world offset (~-7.87)
+                float worldY = terrain.SampleHeight(new Vector3(c.x, 0f, c.y))
+                               + terrain.transform.position.y;
 
                 if (c.h_raw <= 6f)
                 {
@@ -846,7 +848,8 @@ namespace Amakeng
                     matCache[c.img] = mat;
                 }
 
-                float worldY = terrain.SampleHeight(new Vector3(c.x, 0f, c.y));
+                float worldY = terrain.SampleHeight(new Vector3(c.x, 0f, c.y))
+                               + terrain.transform.position.y;
                 var go = new GameObject("Card_" + n);
                 go.transform.SetParent(cardsRoot.transform, false);
                 go.transform.position = new Vector3(c.x, worldY + c.h * 0.5f, c.y);
@@ -1061,7 +1064,8 @@ namespace Amakeng
             var terrGo = GameObject.Find("[GEN] Terrain");
             float y = xz.y;
             if (terrGo != null)
-                y = terrGo.GetComponent<Terrain>().SampleHeight(new Vector3(xz.x, 0f, xz.z));
+                y = terrGo.GetComponent<Terrain>().SampleHeight(new Vector3(xz.x, 0f, xz.z))
+                    + terrGo.transform.position.y;
 
             float lenM = extras.barrier.len_m > 0f ? extras.barrier.len_m : 4f;
             var go = GameObject.CreatePrimitive(PrimitiveType.Cube);
