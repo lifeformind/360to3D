@@ -64,6 +64,7 @@ def cut():
                         cards.append(dict(
                             x=round(px + j * nx, 2), y=round(py + j * ny, 2),
                             h=round(float(min(max(h, 2.0), 8.0)), 1),
+                            h_raw=round(float(min(max(h, 2.0), 30.0)), 1),
                             img=str(rng.choice(names)),
                             yaw_deg=round(float(np.degrees(np.arctan2(-sgn * nx, -sgn * ny))), 1)))
                         break
