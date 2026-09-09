@@ -13,7 +13,7 @@ import geo
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "raw" / "MESH OBJ"
-CLIP_M = 40.0
+CLIP_M = 7.5  # mesh-as-base experiment: clip only the road corridor (was 40.0 backdrop-only)
 MARGIN = 250.0
 S_RANGE = (439.0, 664.0)
 

@@ -127,6 +127,38 @@ def main():
         med = median_filter(out, size=(1, 41, 1))
         out[mask] = med[mask]
 
+    # --- targeted barrier smear mask (mesh-as-base experiment) ---
+    # The physical barrier near s~536 leaves a red-white smear baked into the pushbroom
+    # mosaic at the road edges. The 3D barrier proxy stands there anyway, so hard-mask the
+    # outer-lateral texels around each barrier's station and fill from clean footage of the
+    # same lat row nearby (median over a window that excludes the masked span itself).
+    extras_path = ROOT / "export" / "slice_extras.json"
+    if extras_path.exists():
+        extras = json.loads(extras_path.read_text())
+        barriers = extras.get("barriers")
+        if barriers is None and "barrier" in extras:
+            barriers = [extras["barrier"]]
+        barriers = barriers or []
+        outer_rows = np.where(np.abs(lat) > 3.5)[0]
+        n_replaced = 0
+        for b in barriers:
+            bs = b["s"]
+            win_lo = max(0, int((bs - 6 - s_lo) / TEXEL))
+            win_hi = min(n_s, int((bs + 6 - s_lo) / TEXEL))
+            if win_hi <= win_lo:
+                continue
+            ref_lo = max(0, int((bs - 25 - s_lo) / TEXEL))
+            ref_hi = min(n_s, int((bs + 25 - s_lo) / TEXEL))
+            ref_cols = np.concatenate([np.arange(ref_lo, win_lo), np.arange(win_hi, ref_hi)])
+            if len(ref_cols) == 0:
+                continue
+            for row in outer_rows:
+                out[row, win_lo:win_hi] = np.median(out[row, ref_cols], axis=0)
+                n_replaced += win_hi - win_lo
+        print(f"barrier smear mask: {n_replaced} texel(s) replaced across {len(barriers)} barrier(s)")
+    else:
+        print("no slice_extras.json found; skipping barrier smear mask")
+
     # --- QA report + atlas tiles ---
     rep = Image.fromarray(out.astype(np.uint8)).resize((2250, 140))
     rep.save(ROOT / "work" / "mosaic_report.png")

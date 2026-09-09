@@ -38,4 +38,6 @@ def test_clip_respected(tiles):
         d, _ = tree.query(enu)
         near_slice = d[d < 250]
         if len(near_slice):
-            assert near_slice.min() > 38.0
+            # mesh-as-base experiment: CLIP_M=7.5 clips only the road corridor
+            # (was 40.0 when the mesh was used purely as a distant backdrop).
+            assert near_slice.min() > 7.0

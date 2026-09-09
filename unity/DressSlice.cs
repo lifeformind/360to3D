@@ -26,6 +26,11 @@ namespace Amakeng
         const string GenDir = "Assets/Amakeng/Generated";
         const string TerrainPackRoot = "Assets/TerrainSampleAssets";
         const string TreePackRoot = "Assets/TreePackVol.1";
+        // mesh-as-base baseline: with the photogrammetry mesh now standing in for the
+        // ground close to the road, the flat foliage-card quads read as floating ovals
+        // against it. Disabled for this baseline; the PlaceCards code path is kept intact
+        // (just early-returns) for a future re-enable.
+        const bool CARDS_ENABLED = false;
 
         // Adaptation (review round 2): PlantTrees prefers Assets/TerrainSampleAssets (a
         // Unity-6-era, URP-ready pack) over TreePackVol.1's Tree Creator prefabs, which are
@@ -656,7 +661,16 @@ namespace Amakeng
         static void PlaceCards()
         {
             var cardsRoot = ReplaceChild(GetSliceRoot(), "Cards");
+            if (!CARDS_ENABLED)
+            {
+                Debug.Log("[DressSlice] Cards disabled (mesh-as-base baseline)");
+                return;
+            }
 
+            // CARDS_ENABLED is a const false for this baseline, which makes everything
+            // below statically unreachable (CS0162). Silenced deliberately - this path is
+            // kept intact, not dead, for a future re-enable.
+#pragma warning disable CS0162
             var terrGo = GameObject.Find("[GEN] Terrain");
             if (terrGo == null)
             {
@@ -720,6 +734,7 @@ namespace Amakeng
                 n++;
             }
             Debug.Log("[DressSlice] PlaceCards: " + n + " foliage card quad(s) placed under [GEN] Slice/Cards.");
+#pragma warning restore CS0162
         }
 
         static Mesh MakeQuadMesh(float width, float height)
@@ -745,6 +760,14 @@ namespace Amakeng
         {
             var backdropRoot = ReplaceChild(GetSliceRoot(), "Backdrop");
 
+            // mesh-as-base baseline: the corridor clip (CLIP_M=7.5) leaves torn canopy
+            // edges much closer to the camera than before, exposing backfaces through the
+            // gaps. Clone each tile's material(s) with culling disabled so both sides
+            // render; stored under a dedicated folder, wiped and rebuilt each run.
+            const string matDir = "Assets/Amakeng/GeneratedMaterials";
+            if (AssetDatabase.IsValidFolder(matDir)) AssetDatabase.DeleteAsset(matDir);
+            AssetDatabase.CreateFolder("Assets/Amakeng", "GeneratedMaterials");
+
             var guids = AssetDatabase.FindAssets("t:Model", new[] { GenDir + "/backdrop" });
             int n = 0;
             foreach (var guid in guids)
@@ -761,6 +784,22 @@ namespace Amakeng
                 {
                     var mc = mf.gameObject.AddComponent<MeshCollider>();
                     mc.sharedMesh = mf.sharedMesh;
+                }
+
+                foreach (var mr in inst.GetComponentsInChildren<MeshRenderer>())
+                {
+                    var mats = mr.sharedMaterials;
+                    for (int i = 0; i < mats.Length; i++)
+                    {
+                        var src = mats[i];
+                        if (src == null) continue;
+                        var clone = new Material(src) { name = src.name + "_DoubleSided" };
+                        clone.SetFloat("_Cull", (float)UnityEngine.Rendering.CullMode.Off);
+                        string matPath = matDir + "/" + inst.name + "_" + mr.gameObject.name + "_" + i + ".mat";
+                        AssetDatabase.CreateAsset(clone, matPath);
+                        mats[i] = AssetDatabase.LoadAssetAtPath<Material>(matPath);
+                    }
+                    mr.sharedMaterials = mats;
                 }
                 n++;
             }
