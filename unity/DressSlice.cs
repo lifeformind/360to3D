@@ -25,24 +25,108 @@ namespace Amakeng
     {
         const string GenDir = "Assets/Amakeng/Generated";
         const string TerrainPackRoot = "Assets/TerrainSampleAssets";
-        const string TreePackRoot = "Assets/TreePackVol.1";
+        // SeedMesh tropical packs use Shader Graph materials (Shader Graphs/SeedMesh_* and
+        // Shader Graphs/Basic_vegetation) - but every one of those .shadergraph assets'
+        // Graph Settings has its Active Target set to HDTarget (HDRP) only, with no
+        // UniversalTarget (confirmed by grepping "m_ActiveTargets"/"m_Type" in each
+        // .shadergraph file). Under this project's URP pipeline that makes every material
+        // using them render as Unity's flat magenta "shader not supported by this render
+        // pipeline" placeholder - verified visually via isolated single-prefab
+        // RenderTexture captures (reproduced with post-processing disabled and with
+        // ShaderUtil.allowAsyncCompilation forced off, ruling out an async-compile
+        // placeholder), even though ShaderUtil reports 0 compile messages and
+        // shader.isSupported == true (it compiles fine, just for the wrong pipeline).
+        // FixSeedMeshMaterialsForUrp() below repoints affected materials to a stock
+        // "Universal Render Pipeline/Lit" shader, carrying over each material's own
+        // base-color/normal textures and alpha-clip/double-sided settings - no tinting,
+        // same source pack textures, just wired into a shader URP can actually render.
+        const string SeedMeshJungleRoot = "Assets/SeedMesh/Jungle-Tropical Vegetation/Vegetation";
+        const string SeedMeshTropicalPlantsRoot = "Assets/SeedMesh/Tropical Plants Package/Prefabs";
+        const string SeedMeshGroundFoliageRoot = "Assets/SeedMesh/Ground Foliage Vol.2/Prefabs";
+
+        // Every Shader Graph shipped in the SeedMesh packs we use, all HDRP-targeted only
+        // (see comment above). Any material found under Assets/SeedMesh using one of these
+        // shaders gets repointed to Universal Render Pipeline/Lit by
+        // FixSeedMeshMaterialsForUrp().
+        static readonly string[] SeedMeshHdrpShaderNames =
+        {
+            "Shader Graphs/SeedMesh_Foliage",
+            "Shader Graphs/Basic_vegetation",
+            "Shader Graphs/SeedMesh_Tree_Bark",
+            "Shader Graphs/SeedMesh_Tree_Bark_Layered",
+            "Shader Graphs/SeedMesh_Static_Objects",
+            "Shader Graphs/Vegetation",
+            "Shader Graphs/Cactus",
+            "Shader Graphs/Moss",
+            "Shader Graphs/Sea_water",
+        };
+
+        // One-time, idempotent repair: swaps every HDRP-targeted SeedMesh material (see
+        // SeedMeshHdrpShaderNames) onto Universal Render Pipeline/Lit, copying over its own
+        // base-color (_MainTex) and normal (Normal_vegetation) textures plus its
+        // alpha-clip/double-sided flags. Changes are persisted to the .mat assets, so this
+        // is safe (and cheap - a no-op scan) to call on every Dress() run.
+        static void FixSeedMeshMaterialsForUrp()
+        {
+            var urpLit = Shader.Find("Universal Render Pipeline/Lit");
+            if (urpLit == null)
+            {
+                Debug.LogError("[DressSlice] FixSeedMeshMaterialsForUrp: Universal Render Pipeline/Lit shader not found.");
+                return;
+            }
+
+            var guids = AssetDatabase.FindAssets("t:Material", new[] { "Assets/SeedMesh" });
+            int fixedCount = 0;
+            foreach (var guid in guids)
+            {
+                string path = AssetDatabase.GUIDToAssetPath(guid);
+                var mat = AssetDatabase.LoadAssetAtPath<Material>(path);
+                if (mat == null || mat.shader == null) continue;
+                if (!SeedMeshHdrpShaderNames.Contains(mat.shader.name)) continue;
+
+                var baseTex = mat.HasProperty("_MainTex") ? mat.GetTexture("_MainTex") : null;
+                var normalTex = mat.HasProperty("Normal_vegetation") ? mat.GetTexture("Normal_vegetation") : null;
+                Color tint = mat.HasProperty("_Color") ? mat.GetColor("_Color") : Color.white;
+                float cutoff = mat.HasProperty("_cutoff") ? mat.GetFloat("_cutoff") : 0.33f;
+                bool alphaClip = mat.HasProperty("_AlphaCutoffEnable") ? mat.GetFloat("_AlphaCutoffEnable") > 0.5f : true;
+                bool doubleSided = mat.HasProperty("_DoubleSidedEnable") ? mat.GetFloat("_DoubleSidedEnable") > 0.5f : true;
+
+                mat.shader = urpLit;
+                mat.shaderKeywords = Array.Empty<string>();
+                mat.SetFloat("_WorkflowMode", 1f); // Metallic
+                mat.SetFloat("_Surface", 0f);      // Opaque (cutout, not alpha-blended)
+                mat.SetFloat("_Smoothness", 0.08f);
+                mat.SetFloat("_Metallic", 0f);
+                if (baseTex != null) mat.SetTexture("_BaseMap", baseTex);
+                mat.SetColor("_BaseColor", tint);
+                if (normalTex != null)
+                {
+                    mat.SetTexture("_BumpMap", normalTex);
+                    mat.EnableKeyword("_NORMALMAP");
+                    mat.SetFloat("_BumpScale", 1f);
+                }
+                mat.SetFloat("_AlphaClip", alphaClip ? 1f : 0f);
+                if (alphaClip)
+                {
+                    mat.SetFloat("_Cutoff", cutoff);
+                    mat.EnableKeyword("_ALPHATEST_ON");
+                    mat.renderQueue = (int)UnityEngine.Rendering.RenderQueue.AlphaTest;
+                }
+                mat.SetFloat("_Cull", (float)(doubleSided
+                    ? UnityEngine.Rendering.CullMode.Off : UnityEngine.Rendering.CullMode.Back));
+                mat.doubleSidedGI = doubleSided;
+                EditorUtility.SetDirty(mat);
+                fixedCount++;
+            }
+            if (fixedCount > 0) AssetDatabase.SaveAssets();
+            Debug.Log("[DressSlice] FixSeedMeshMaterialsForUrp: repointed " + fixedCount +
+                " HDRP-targeted SeedMesh material(s) to Universal Render Pipeline/Lit.");
+        }
         // mesh-as-base baseline: with the photogrammetry mesh now standing in for the
         // ground close to the road, the flat foliage-card quads read as floating ovals
         // against it. Disabled for this baseline; the PlaceCards code path is kept intact
         // (just early-returns) for a future re-enable.
         const bool CARDS_ENABLED = false;
-
-        // Bush prototypes (foliage_cards placements with h_raw <= 6 m): TerrainSampleAssets
-        // (a Unity-6-era, URP-ready pack) has no prefab literally named "Tree" (verified by
-        // FindAssets) - the tallest, most canopy-shaped items it has are these 4 bushes,
-        // which share the same URP "Shader Graphs/TerrainGrass" material family as the
-        // Grass_A/Fern_A detail prototypes already used in PaintDetails (so no magenta
-        // risk). Standing them in for low canopy also matches this project's own stated
-        // priority (CLAUDE.md: "Vegetation detail does not matter"). Real trees for
-        // h_raw > 6 m now come from TreePackVol.1 via material conversion - see
-        // ConvertTreeMaterial / DiscoverBigTreeVariants below.
-        static readonly string[] PreferredTerrainTreeNames = { "Bush_A", "Bush_B", "BushDry_A", "BushDry_B" };
-        const int MaxBushPrototypes = 4;
 
         static float MeasureHeight(GameObject prefab)
         {
@@ -53,121 +137,40 @@ namespace Amakeng
             return Mathf.Max(0.5f, b.size.y);
         }
 
-        // Discovers up to MaxBushPrototypes (prefab, measuredHeight) pairs from
-        // TerrainSampleAssets (see PreferredTerrainTreeNames adaptation note above).
-        static List<(GameObject prefab, float baseline)> DiscoverBushPrototypes()
+        // Terrain.SampleHeight() in this project does NOT reliably include the terrain
+        // GameObject's own transform.position.y - confirmed by comparing it against a
+        // Physics.Raycast onto the live TerrainCollider (ground truth): the raycast hit
+        // matched SampleHeight(xz) + terrain.transform.position.y almost exactly (both
+        // on- and off-road test points), not SampleHeight(xz) alone (which was off by
+        // ~7.9 m, i.e. by |height_min| - the terrain's own Y origin). Centralised here so
+        // every placement call site (trees, understory, barrier) uses the same, verified
+        // formula instead of each guessing independently.
+        static float WorldTerrainHeight(Terrain terrain, float worldX, float worldZ) =>
+            terrain.SampleHeight(new Vector3(worldX, 0f, worldZ)) + terrain.transform.position.y;
+
+        // Discovers prefabs under `root` (recursively, via FindAssets - robust to pack
+        // reorganization) whose filename starts with `prefix` (case-insensitive), or all
+        // prefabs under `root` matching an optional predicate. Sorted for a deterministic
+        // order.
+        static List<GameObject> DiscoverPrefabs(string root, Func<string, bool> nameFilter = null)
         {
-            var chosen = new List<(GameObject, float)>();
-            var terrainGuids = AssetDatabase.FindAssets("t:Prefab", new[] { TerrainPackRoot });
-            foreach (var name in PreferredTerrainTreeNames)
-            {
-                if (chosen.Count >= MaxBushPrototypes) break;
-                var guid = terrainGuids.FirstOrDefault(g =>
-                    Path.GetFileNameWithoutExtension(AssetDatabase.GUIDToAssetPath(g)) == name);
-                if (guid == null) continue;
-                var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(AssetDatabase.GUIDToAssetPath(guid));
-                if (prefab != null) chosen.Add((prefab, MeasureHeight(prefab)));
-            }
-            return chosen;
+            var guids = AssetDatabase.FindAssets("t:Prefab", new[] { root });
+            IEnumerable<string> paths = guids.Select(AssetDatabase.GUIDToAssetPath).Distinct();
+            if (nameFilter != null)
+                paths = paths.Where(p => nameFilter(Path.GetFileNameWithoutExtension(p)));
+            return paths.OrderBy(p => p, StringComparer.Ordinal)
+                .Select(p => AssetDatabase.LoadAssetAtPath<GameObject>(p))
+                .Where(go => go != null).ToList();
         }
 
-        // Big tree variants (foliage_cards placements with h_raw > 6 m): TreePackVol.1's 48
-        // prefabs all use the Tree Creator engine ("Optimized Bark Material" / "Optimized
-        // Leaf Material", Hidden/Nature/Tree Creator ... shaders) over healthy meshes and
-        // textures - proved working under URP by hand-converting a few instances
-        // ([PROBE] Trees, removed by Dress() on the next run). See ConvertTreeMaterial for
-        // the exact recipe. Picks BigTreeVariantCount prefabs via FindAssets (discovery,
-        // not a hardcoded path list), sorted for a stable/deterministic order, evenly
-        // spaced across the sorted list so the selection naturally spans the pack's
-        // folders (which sort as "0/","1/",...,"5/","Palm/") for visual variety.
-        const int BigTreeVariantCount = 5;
+        static List<GameObject> DiscoverByPrefix(string root, string prefix) =>
+            DiscoverPrefabs(root, name => name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
 
-        // The pack is not uniformly "33-38m native" as assumed - it also contains a few
-        // small sapling/shrub-scale outliers (e.g. a ~2.2-2.4m prefab), confirmed both here
-        // and in an earlier discovery pass. Uniform-scaling one of those up to a normal
-        // h_raw target (6-15 m) stretches it 4-6x, which visually reads as an oversized,
-        // distorted weed rather than a tree (seen first-hand in a driver capture before
-        // this filter was added). Guard against that by only accepting evenly-spaced
-        // candidates whose OWN measured bounds height already clears a plausible native
-        // tree height; if the even spacing runs out before finding enough, fall back to a
-        // full linear scan of the (still deterministically sorted) remaining prefabs.
-        const float MinNativeTreeHeight = 10f;
-
-        static List<GameObject> DiscoverBigTreeVariants()
-        {
-            var guids = AssetDatabase.FindAssets("t:Prefab", new[] { TreePackRoot + "/Prefabs" });
-            var paths = guids.Select(AssetDatabase.GUIDToAssetPath).Distinct()
-                .OrderBy(p => p, StringComparer.Ordinal).ToList();
-            var variants = new List<GameObject>();
-            if (paths.Count == 0) return variants;
-
-            int step = Mathf.Max(1, paths.Count / BigTreeVariantCount);
-            for (int i = 0; i < paths.Count && variants.Count < BigTreeVariantCount; i += step)
-            {
-                var go = AssetDatabase.LoadAssetAtPath<GameObject>(paths[i]);
-                if (go != null && MeasureHeight(go) >= MinNativeTreeHeight) variants.Add(go);
-            }
-            if (variants.Count < BigTreeVariantCount)
-            {
-                foreach (var p in paths)
-                {
-                    if (variants.Count >= BigTreeVariantCount) break;
-                    var go = AssetDatabase.LoadAssetAtPath<GameObject>(p);
-                    if (go != null && !variants.Contains(go) && MeasureHeight(go) >= MinNativeTreeHeight)
-                        variants.Add(go);
-                }
-            }
-            return variants;
-        }
-
-        // Converts one TreePackVol.1 source material to a working URP/Lit material, using
-        // the exact recipe hand-proven in [PROBE] Trees: _BaseMap = source mainTexture,
-        // _Smoothness 0; materials whose name contains "leaf"/"leaves" additionally get
-        // alpha-test cutout (Cutoff 0.4), two-sided culling, and doubleSidedGI, matching
-        // how real tree canopies read (bark stays opaque/single-sided, unchanged). Cached
-        // by source material reference and persisted under GeneratedMaterialsDir
-        // (delete-before-create per converted asset) so repeated placements of the same
-        // tree prefab reuse one converted material instead of duplicating it.
-        //
-        // Note: the review brief described these as "shared across all 48 prefabs, so only
-        // 2 assets typically" - empirically false (verified via instance-ID/texture probes):
-        // every one of the 48 prefabs embeds its OWN distinct Bark/Leaf material and
-        // texture, even within the same folder. The cache below is still correct and useful
-        // (it dedupes repeated *placements* of the same chosen variant within one Dress()
-        // run), it just doesn't collapse to 2 assets when variants are picked across
-        // multiple prefabs - see the fix report for the actual count observed.
-        static Material ConvertTreeMaterial(Material src, Dictionary<Material, Material> cache)
-        {
-            if (src == null) return null;
-            if (cache.TryGetValue(src, out var cached)) return cached;
-
-            var shader = Shader.Find("Universal Render Pipeline/Lit");
-            var mat = new Material(shader) { name = src.name };
-            var mainTex = src.mainTexture;
-            if (mainTex != null) { mat.SetTexture("_BaseMap", mainTex); mat.mainTexture = mainTex; }
-            mat.SetFloat("_Smoothness", 0f);
-
-            bool isLeaf = src.name.IndexOf("leaf", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                          src.name.IndexOf("leaves", StringComparison.OrdinalIgnoreCase) >= 0;
-            if (isLeaf)
-            {
-                mat.SetFloat("_AlphaClip", 1f);
-                mat.SetFloat("_Cutoff", 0.4f);
-                mat.SetFloat("_Cull", (float)UnityEngine.Rendering.CullMode.Off);
-                mat.EnableKeyword("_ALPHATEST_ON");
-                mat.renderQueue = (int)UnityEngine.Rendering.RenderQueue.AlphaTest;
-                mat.doubleSidedGI = true;
-            }
-
-            EnsureFolder(GeneratedMaterialsDir);
-            string safeName = src.name.Replace(" ", "_");
-            string matPath = GeneratedMaterialsDir + "/TreeConv_" + cache.Count + "_" + safeName + ".mat";
-            AssetDatabase.DeleteAsset(matPath);
-            AssetDatabase.CreateAsset(mat, matPath);
-            var saved = AssetDatabase.LoadAssetAtPath<Material>(matPath);
-            cache[src] = saved;
-            return saved;
-        }
+        // "Pot_*" prefabs in the Tropical Plants pack are potted-plant props (a container +
+        // plant, meant for indoor/patio scenes) - excluded from outdoor roadside placement.
+        static List<GameObject> DiscoverTropicalPlantsMix() =>
+            DiscoverPrefabs(SeedMeshTropicalPlantsRoot,
+                name => !name.StartsWith("Pot", StringComparison.OrdinalIgnoreCase));
 
         [MenuItem("Amakeng/Dress Slice")]
         public static void Dress()
@@ -177,15 +180,28 @@ namespace Amakeng
 
             // Cleanup: remove the ad hoc "[PROBE] Trees" group used to hand-prove the
             // TreePackVol.1 URP material conversion recipe before it was wired into
-            // PlantTrees below.
+            // PlantTrees (that recipe is no longer used - see PlantTrees' header comment).
             var probeTrees = GameObject.Find("[PROBE] Trees");
             if (probeTrees != null) UnityEngine.Object.DestroyImmediate(probeTrees);
 
+            // Cleanup (SeedMesh rework): TreePackVol.1 is being removed at the user's
+            // request (re-importable from their account if ever needed again) now that
+            // SeedMesh supplies URP-native trees with no conversion step. Also removes the
+            // TreeConv_* materials that were converted from it - both idempotent (no-op if
+            // already gone). Assets/TerrainSampleAssets is NOT touched - its terrain layers
+            // and grass/fern detail textures are still used by PaintDetails/FixGroundMaterial.
+            if (AssetDatabase.IsValidFolder("Assets/TreePackVol.1"))
+                AssetDatabase.DeleteAsset("Assets/TreePackVol.1");
+            foreach (var guid in AssetDatabase.FindAssets("TreeConv", new[] { GeneratedMaterialsDir }))
+                AssetDatabase.DeleteAsset(AssetDatabase.GUIDToAssetPath(guid));
+
             ConvertPackMaterials();
+            FixSeedMeshMaterialsForUrp();
             BuildOverlay();
             PaintDetails();
             FixGroundMaterial();
             PlantTrees();
+            ScatterUnderstory();
             PlaceCards();
             ImportBackdrop();
             PlaceBarrier();
@@ -610,65 +626,22 @@ namespace Amakeng
                 "(kills residual skybox-reflection sheen).");
         }
 
-        // Adaptation (review round 3, item 3): TerrainSampleAssets' bush shader graph
-        // ("Shader Graphs/TerrainGrass") exposes no discoverable/settable base-colour tint
-        // property - Unity's generic Material.color/.mainTexture (which normally resolve a
-        // shader's [MainColor]/[MainTexture]-tagged properties) both error with "doesn't
-        // have a colour/texture property" for this shader, and none of its ~90 exposed
-        // properties (dumped via ShaderUtil) is a plain base-colour multiplier. Its base
-        // colour texture IS exposed, just under an auto-generated Shader-Graph property
-        // name ("Texture2D_E1B0D043"), found by probing each TexEnv slot and matching the
-        // returned texture against the prefab's own "<Name>_BaseColor" asset. Rather than
-        // fight that shader, instantiated bushes get a fresh, ordinary URP/Lit material
-        // using the same base-colour texture with _BaseColor multiplied toward
-        // (0.5, 0.75, 0.45) - guaranteed to work (URP/Lit is already used throughout this
-        // file) at the cost of losing the pack's wind animation on these background props,
-        // an acceptable trade-off given CLAUDE.md's own priority ("Vegetation detail does
-        // not matter"). Applied uniformly to all instantiated bushes (not just the two
-        // "Dry" variants) because the pack only has 4 bush-like items total (2 green + 2
-        // dry) and all 4 are needed to reach the requested prototype count.
-        const string BushBaseColorTexProperty = "Texture2D_E1B0D043";
-
-        static Material MakeGreenTintedBushMaterial(GameObject prefab)
-        {
-            var srcRenderer = prefab.GetComponentInChildren<Renderer>();
-            var srcMat = srcRenderer != null ? srcRenderer.sharedMaterial : null;
-            Texture baseTex = null;
-            if (srcMat != null && srcMat.HasProperty(BushBaseColorTexProperty))
-                baseTex = srcMat.GetTexture(BushBaseColorTexProperty);
-            else
-                Debug.LogWarning("[DressSlice] MakeGreenTintedBushMaterial: " + prefab.name +
-                    "'s material has no '" + BushBaseColorTexProperty + "' property; using a flat tint.");
-
-            var shader = Shader.Find("Universal Render Pipeline/Lit");
-            var mat = new Material(shader) { name = "TreeTint_" + prefab.name };
-            if (baseTex != null) { mat.SetTexture("_BaseMap", baseTex); mat.mainTexture = baseTex; }
-            mat.SetColor("_BaseColor", new Color(0.5f, 0.75f, 0.45f, 1f));
-            mat.SetFloat("_Cull", (float)UnityEngine.Rendering.CullMode.Off); // foliage cards within the mesh
-            mat.SetFloat("_Smoothness", 0.15f);
-
-            string matPath = "Assets/Amakeng/TreeTint_" + prefab.name + ".mat";
-            AssetDatabase.DeleteAsset(matPath);
-            AssetDatabase.CreateAsset(mat, matPath);
-            return AssetDatabase.LoadAssetAtPath<Material>(matPath);
-        }
-
         // -------------------------------------------------------------------
-        // 4. Trees (foliage_cards placements): h_raw > 6 m -> real TreePackVol.1 trees
-        // (material-converted, see ConvertTreeMaterial); h_raw <= 6 m -> bush treatment
-        // (unchanged from round 2/3).
+        // 4. Trees (foliage_cards placements): SeedMesh tropical packs, all Shader Graph/
+        // URP-native - no material conversion needed (that whole machinery, built for the
+        // Tree Creator-shader TreePackVol.1, is gone along with the pack - see Dress()'s
+        // cleanup step and item 3 of the fix report).
+        //   h_raw >  6 m: Dense_Jungle_Tree_Var* (single trees); h_raw >= 12 m prefers
+        //     Background_group_var* (multi-tree clusters - reads as a treeline clump
+        //     rather than one implausibly stretched single tree at that height).
+        //   h_raw <= 6 m: Forest_bush_var*/Common_bush_var* + a mix of Tropical Plants
+        //     prefabs (no tint needed - SeedMesh materials are already correct).
+        // All instances placed as ordinary instantiated GameObjects under
+        // [GEN] Slice/Trees (not Unity's built-in Terrain tree prototypes/instances -
+        // see the round-2 fix report for why that path doesn't work here).
         // -------------------------------------------------------------------
-        // Adaptation (review round 2, item 2 follow-up): all instances placed as ordinary
-        // instantiated GameObjects under [GEN] Slice/Trees, NOT as Unity's built-in Terrain
-        // tree prototypes/instances (terrainData.treePrototypes / SetTreeInstances). Unity's
-        // terrain tree renderer requires a Tree-Creator/SpeedTree/Soft-Occlusion-family
-        // shader for correct billboarding and lighting - assigning the round-2 fix's
-        // TerrainSampleAssets bushes (Shader Graphs/TerrainGrass) as tree PROTOTYPES
-        // triggers exactly this in-editor warning: "The tree Bush_A must use the Nature/
-        // Soft Occlusion shader. Otherwise billboarding/lighting will not work correctly."
-        // Plain GameObjects (used here, and already used for backdrop/cards) have no such
-        // requirement and render normally under URP - true for both the bushes and the
-        // now-converted TreePackVol.1 prefabs.
+        const float BackgroundGroupMinHRaw = 12f;
+
         static void PlantTrees()
         {
             var treesRoot = ReplaceChild(GetSliceRoot(), "Trees");
@@ -688,23 +661,20 @@ namespace Amakeng
             terrain.terrainData.SetTreeInstances(new TreeInstance[0], true);
             terrain.terrainData.treePrototypes = new TreePrototype[0];
 
-            var bushes = DiscoverBushPrototypes();
-            if (bushes.Count == 0)
-                Debug.LogError("[DressSlice] PlantTrees: no bush prototypes found under " + TerrainPackRoot + ".");
-            else if (bushes.Count < MaxBushPrototypes)
-                Debug.LogWarning("[DressSlice] PlantTrees: only " + bushes.Count + "/" + MaxBushPrototypes +
-                    " bush prototypes available.");
-            var bushTintMats = bushes.Select(d => MakeGreenTintedBushMaterial(d.prefab)).ToList();
+            var singleTrees = DiscoverByPrefix(SeedMeshJungleRoot, "Dense_Jungle_Tree_Var");
+            var groupTrees = DiscoverByPrefix(SeedMeshJungleRoot, "Background_group_var");
+            var lowPool = DiscoverByPrefix(SeedMeshGroundFoliageRoot, "Forest_bush_var")
+                .Concat(DiscoverByPrefix(SeedMeshGroundFoliageRoot, "Common_bush_var"))
+                .Concat(DiscoverTropicalPlantsMix()).ToList();
 
-            var bigTrees = DiscoverBigTreeVariants();
-            if (bigTrees.Count == 0)
-                Debug.LogError("[DressSlice] PlantTrees: no TreePackVol.1 variants found under " +
-                    TreePackRoot + "/Prefabs.");
-            var bigTreeBaselines = bigTrees.Select(MeasureHeight).ToList();
-            Debug.Log("[DressSlice] PlantTrees: bush prototypes = " +
-                string.Join(", ", bushes.Select(d => d.prefab.name)) + "; big tree variants = " +
-                string.Join(", ", bigTrees.Select(p => p.name + " (~" +
-                    bigTreeBaselines[bigTrees.IndexOf(p)].ToString("F1") + "m native)")));
+            if (singleTrees.Count == 0 && groupTrees.Count == 0)
+                Debug.LogError("[DressSlice] PlantTrees: no jungle tree/group prefabs found under " +
+                    SeedMeshJungleRoot + ".");
+            if (lowPool.Count == 0)
+                Debug.LogError("[DressSlice] PlantTrees: no bush/tropical-plant prefabs found under " +
+                    SeedMeshGroundFoliageRoot + " / " + SeedMeshTropicalPlantsRoot + ".");
+            Debug.Log("[DressSlice] PlantTrees: single trees=" + singleTrees.Count + ", group trees=" +
+                groupTrees.Count + ", low-canopy pool=" + lowPool.Count + " (bush + tropical mix)");
 
             var placements = LoadPlacements();
             if (placements == null || placements.cards == null)
@@ -713,24 +683,39 @@ namespace Amakeng
                 return;
             }
 
-            var matCache = new Dictionary<Material, Material>();
-            int nBush = 0, nTree = 0, bushCursor = 0;
+            int nSingle = 0, nGroup = 0, nLow = 0;
             for (int i = 0; i < placements.cards.Length; i++)
             {
                 var c = placements.cards[i];
-                // SampleHeight is relative to the terrain object; add its world offset (~-7.87)
-                float worldY = terrain.SampleHeight(new Vector3(c.x, 0f, c.y))
-                               + terrain.transform.position.y;
+                float worldY = WorldTerrainHeight(terrain, c.x, c.y);
+                // Deterministic per placement (not per iteration order): variant pick, yaw,
+                // and scale jitter are all seeded by the placement's own index.
+                var rng = new System.Random(20260908 + i);
 
-                if (c.h_raw <= 6f)
+                if (c.h_raw > 6f)
                 {
-                    if (bushes.Count == 0) continue;
-                    int protoIdx = bushCursor % bushes.Count;
-                    bushCursor++;
-                    var prefab = bushes[protoIdx].prefab;
-                    float baseline = bushes[protoIdx].baseline;
-                    var brng = new System.Random(20260908 + i);
-                    float jitter = 0.9f + (float)brng.NextDouble() * 0.2f;
+                    bool useGroup = c.h_raw >= BackgroundGroupMinHRaw && groupTrees.Count > 0;
+                    var pool = useGroup ? groupTrees : (singleTrees.Count > 0 ? singleTrees : groupTrees);
+                    if (pool.Count == 0) continue;
+                    var prefab = pool[rng.Next(pool.Count)];
+                    float baseline = Mathf.Max(1f, MeasureHeight(prefab));
+                    float scale = Mathf.Clamp(c.h_raw / baseline, 0.02f, 10f);
+                    float yaw = (float)(rng.NextDouble() * 360.0);
+
+                    var inst = (GameObject)PrefabUtility.InstantiatePrefab(prefab);
+                    inst.name = prefab.name + "_" + i;
+                    inst.transform.SetParent(treesRoot.transform, false);
+                    inst.transform.position = new Vector3(c.x, worldY, c.y);
+                    inst.transform.rotation = Quaternion.Euler(0f, yaw, 0f);
+                    inst.transform.localScale = Vector3.one * scale;
+                    if (useGroup) nGroup++; else nSingle++;
+                }
+                else
+                {
+                    if (lowPool.Count == 0) continue;
+                    var prefab = lowPool[rng.Next(lowPool.Count)];
+                    float baseline = Mathf.Max(0.2f, MeasureHeight(prefab));
+                    float jitter = 0.9f + (float)rng.NextDouble() * 0.2f;
                     float scale = Mathf.Clamp(c.h / baseline, 0.05f, 6f) * jitter;
 
                     var inst = (GameObject)PrefabUtility.InstantiatePrefab(prefab);
@@ -739,44 +724,103 @@ namespace Amakeng
                     inst.transform.position = new Vector3(c.x, worldY, c.y);
                     inst.transform.rotation = Quaternion.Euler(0f, c.yaw_deg, 0f);
                     inst.transform.localScale = Vector3.one * scale;
-                    foreach (var r in inst.GetComponentsInChildren<Renderer>())
-                        r.sharedMaterial = bushTintMats[protoIdx];
-                    nBush++;
-                }
-                else
-                {
-                    if (bigTrees.Count == 0) continue;
-                    // Deterministic per placement (not per iteration order): variant pick
-                    // and yaw are both seeded by the placement's own index.
-                    var trng = new System.Random(20260908 + i);
-                    int variantIdx = trng.Next(bigTrees.Count);
-                    var prefab = bigTrees[variantIdx];
-                    float baseline = Mathf.Max(1f, bigTreeBaselines[variantIdx]);
-                    float scale = Mathf.Clamp(c.h_raw / baseline, 0.01f, 10f);
-                    float yaw = (float)(trng.NextDouble() * 360.0);
-
-                    var inst = (GameObject)PrefabUtility.InstantiatePrefab(prefab);
-                    inst.name = prefab.name.Replace(" ", "_") + "_" + i;
-                    inst.transform.SetParent(treesRoot.transform, false);
-                    inst.transform.position = new Vector3(c.x, worldY, c.y);
-                    inst.transform.rotation = Quaternion.Euler(0f, yaw, 0f);
-                    inst.transform.localScale = Vector3.one * scale;
-                    foreach (var r in inst.GetComponentsInChildren<Renderer>())
-                    {
-                        var mats = r.sharedMaterials;
-                        for (int m = 0; m < mats.Length; m++)
-                        {
-                            var conv = ConvertTreeMaterial(mats[m], matCache);
-                            if (conv != null) mats[m] = conv;
-                        }
-                        r.sharedMaterials = mats;
-                    }
-                    nTree++;
+                    nLow++;
                 }
             }
-            Debug.Log("[DressSlice] PlantTrees: " + nTree + " real tree instance(s) from " + bigTrees.Count +
-                " variant(s) (" + matCache.Count + " converted material asset(s)), " + nBush +
-                " bush instance(s) from " + bushes.Count + " prototype(s).");
+            Debug.Log("[DressSlice] PlantTrees: " + nSingle + " single tree(s), " + nGroup +
+                " tree-group cluster(s), " + nLow + " low-canopy (bush/tropical) instance(s).");
+        }
+
+        // -------------------------------------------------------------------
+        // 4b. Understory scatter (SeedMesh rework): a dense band of small ground-cover /
+        // understory plants along both verges of the SLICE centreline, independent of the
+        // foliage_cards placements above (which are sparser and driven by canopy-height
+        // raster sampling, not a dense walk). Fixes "still sparse" between PlantTrees'
+        // relatively few large-canopy instances.
+        // -------------------------------------------------------------------
+        const float UnderstorySRangeLo = 439f, UnderstorySRangeHi = 664f; // matches the slice's own station range
+        const float UnderstoryStationStep = 1.5f;
+        const float UnderstoryLatMin = 4f, UnderstoryLatMax = 9f;
+        const float UnderstoryRoadClearance = 5.5f; // half-road + margin; anything closer is skipped
+        const int UnderstoryMaxResample = 6; // retries to find a lateral clearing the road before skipping
+
+        static void ScatterUnderstory()
+        {
+            var understoryRoot = ReplaceChild(GetSliceRoot(), "Understory");
+
+            var terrGo = GameObject.Find("[GEN] Terrain");
+            if (terrGo == null)
+            {
+                Debug.LogError("[DressSlice] ScatterUnderstory: [GEN] Terrain not found; run Amakeng/Build Scene first.");
+                return;
+            }
+            var terrain = terrGo.GetComponent<Terrain>();
+
+            string centerlinePath = Path.Combine(GenDir, "centerline.json");
+            if (!File.Exists(centerlinePath))
+            {
+                Debug.LogError("[DressSlice] ScatterUnderstory: centerline.json not found (run 70_sync_unity.py).");
+                return;
+            }
+            var cl = JsonUtility.FromJson<CenterlineRoot>(File.ReadAllText(centerlinePath));
+            if (cl == null || cl.stations == null || cl.stations.Length == 0)
+            {
+                Debug.LogError("[DressSlice] ScatterUnderstory: centerline.json has no stations.");
+                return;
+            }
+
+            var pool = DiscoverPrefabs(SeedMeshGroundFoliageRoot).Concat(DiscoverTropicalPlantsMix()).ToList();
+            if (pool.Count == 0)
+            {
+                Debug.LogError("[DressSlice] ScatterUnderstory: no prefabs found under " +
+                    SeedMeshGroundFoliageRoot + " / " + SeedMeshTropicalPlantsRoot + ".");
+                return;
+            }
+
+            var stations = cl.stations
+                .Where(st => !st.provisional && st.s >= UnderstorySRangeLo && st.s <= UnderstorySRangeHi)
+                .OrderBy(st => st.s).ToList();
+
+            int n = 0, attempted = 0, skipped = 0;
+            float nextS = UnderstorySRangeLo;
+            foreach (var st in stations)
+            {
+                if (st.s < nextS) continue;
+                nextS += UnderstoryStationStep;
+
+                // ENU left normal = (-ty, tx) (see PlaceBarrier's derivation); side=+1 is
+                // left of travel, side=-1 is right - covers "both sides" of the road.
+                foreach (int side in new[] { 1, -1 })
+                {
+                    attempted++;
+                    var rng = new System.Random(20260908 + attempted);
+                    float lat = 0f;
+                    for (int t = 0; t < UnderstoryMaxResample; t++)
+                    {
+                        lat = UnderstoryLatMin + (float)rng.NextDouble() * (UnderstoryLatMax - UnderstoryLatMin);
+                        if (lat >= UnderstoryRoadClearance) break;
+                    }
+                    if (lat < UnderstoryRoadClearance) { skipped++; continue; }
+
+                    float worldX = st.x + side * lat * (-st.ty);
+                    float worldZ = st.y + side * lat * st.tx;
+                    float worldY = WorldTerrainHeight(terrain, worldX, worldZ);
+
+                    var prefab = pool[rng.Next(pool.Count)];
+                    float yaw = (float)(rng.NextDouble() * 360.0);
+                    float scale = 0.8f + (float)rng.NextDouble() * 0.5f;
+
+                    var inst = (GameObject)PrefabUtility.InstantiatePrefab(prefab);
+                    inst.name = prefab.name + "_u" + n;
+                    inst.transform.SetParent(understoryRoot.transform, false);
+                    inst.transform.position = new Vector3(worldX, worldY, worldZ);
+                    inst.transform.rotation = Quaternion.Euler(0f, yaw, 0f);
+                    inst.transform.localScale = Vector3.one * scale;
+                    n++;
+                }
+            }
+            Debug.Log("[DressSlice] ScatterUnderstory: " + n + " instance(s) from " + pool.Count +
+                " prefab(s) (" + attempted + " candidate slot(s), " + skipped + " skipped for road clearance).");
         }
 
         // -------------------------------------------------------------------
@@ -848,8 +892,7 @@ namespace Amakeng
                     matCache[c.img] = mat;
                 }
 
-                float worldY = terrain.SampleHeight(new Vector3(c.x, 0f, c.y))
-                               + terrain.transform.position.y;
+                float worldY = WorldTerrainHeight(terrain, c.x, c.y);
                 var go = new GameObject("Card_" + n);
                 go.transform.SetParent(cardsRoot.transform, false);
                 go.transform.position = new Vector3(c.x, worldY + c.h * 0.5f, c.y);
@@ -1064,8 +1107,7 @@ namespace Amakeng
             var terrGo = GameObject.Find("[GEN] Terrain");
             float y = xz.y;
             if (terrGo != null)
-                y = terrGo.GetComponent<Terrain>().SampleHeight(new Vector3(xz.x, 0f, xz.z))
-                    + terrGo.transform.position.y;
+                y = WorldTerrainHeight(terrGo.GetComponent<Terrain>(), xz.x, xz.z);
 
             float lenM = extras.barrier.len_m > 0f ? extras.barrier.len_m : 4f;
             var go = GameObject.CreatePrimitive(PrimitiveType.Cube);
