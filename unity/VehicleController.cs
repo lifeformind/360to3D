@@ -29,7 +29,9 @@ namespace Amakeng
             {
                 if (wheelVisuals[i] == null) continue;
                 wcs[i].GetWorldPose(out var p, out var q);
-                wheelVisuals[i].SetPositionAndRotation(p, q);
+                // GetWorldPose assumes a wheel mesh spinning about local X; the cylinder
+                // primitive's axis is local Y, so re-apply the axis-corrective every frame.
+                wheelVisuals[i].SetPositionAndRotation(p, q * Quaternion.Euler(0, 0, 90));
             }
         }
 
