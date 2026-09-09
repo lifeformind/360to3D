@@ -32,9 +32,12 @@ git history on `vertical-slice`.
 
 ## Recipe gaps / decisions for the user
 
-- **No true 3D-tree band**: neither installed pack has URP-compatible tall trees (TreePackVol.1
-  is Tree Creator = magenta). Canopy = foliage cards + photogrammetry backdrop + stretched
-  bushes. Decide at acceptance: license/buy a URP tree pack vs accept the current look.
+- **RESOLVED 2026-09-09 — real trees work**: TreePackVol.1 trees run in URP after manual
+  material rebuild (bark = URP Lit opaque; leaves = URP Lit alpha-cutout _Cutoff 0.4 Cull Off,
+  same textures; wind sway lost; each of the 48 prefabs embeds its OWN materials — ~9 converted
+  assets for 5 variants, not 2; sub-10 m sapling prefabs must be filtered before height
+  scaling). Open tuning: cull the dark shard-leaf variants; enforce a minimum tree-to-road
+  distance (~10 m) so big leaf-planes never sit at close range.
 - `RenderSettings.reflectionIntensity = 0` is global — kills reflections on the vehicle and
   future shiny landmarks (Part B); scope it properly in the rollout.
 - Bush wind animation lost with the green-tint material swap (accepted for the slice).
