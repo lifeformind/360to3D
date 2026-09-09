@@ -14,13 +14,13 @@ def tiles():
 
 
 def test_tiles_produced(tiles):
-    # slice bbox +250 m margin spans 3x3..4x5 tiles of 200 m
-    assert 9 <= len(tiles) <= 20
+    # full circuit bbox (~1.1 x 0.46 km) +250 m margin in 200 m tiles
+    assert 30 <= len(tiles) <= 80
 
 
 def test_clip_respected(tiles):
     cl = json.loads((ROOT / "work" / "centerline.json").read_text())
-    sts = [st for st in cl["stations"] if 400 <= st["s"] <= 700]
+    sts = [st for st in cl["stations"] if not st["provisional"]]
     from scipy.spatial import cKDTree
     tree = cKDTree([[st["x"], st["y"]] for st in sts])
     verts, faces = [], []

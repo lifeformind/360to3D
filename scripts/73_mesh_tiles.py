@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "raw" / "MESH OBJ"
 CLIP_M = 7.5  # mesh-as-base experiment: clip only the road corridor (was 40.0 backdrop-only)
 MARGIN = 250.0
-S_RANGE = (439.0, 664.0)
+S_RANGE = None  # None = full recorded circuit; or (s_min, s_max) window in metres
 
 
 def main():
@@ -23,7 +23,7 @@ def main():
     z0 = cl["z0"]
     sts = [st for st in cl["stations"] if not st["provisional"]]
     tree = cKDTree([[st["x"], st["y"]] for st in sts])
-    sl = [st for st in sts if S_RANGE[0] <= st["s"] <= S_RANGE[1]]
+    sl = sts if S_RANGE is None else [st for st in sts if S_RANGE[0] <= st["s"] <= S_RANGE[1]]
     xs = [st["x"] for st in sl]
     ys = [st["y"] for st in sl]
 
