@@ -20,7 +20,9 @@ def plants(forest):
 
 def test_counts_and_layers(forest):
     ps = plants(forest)
-    assert 1500 <= len(ps) <= 9000
+    # expected-count math for the default slice window: ~60% of band cells vegetated
+    # at mean cover_prob 0.42 -> ~1700-1900 structure+ground plants
+    assert 1600 <= len(ps) <= 2400
     layers = {p["layer"] for p in ps}
     assert layers == {"canopy", "mid", "under", "ground", "wall"}
     assert all(p["h"] >= 12 for p in ps if p["layer"] == "canopy")
