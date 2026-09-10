@@ -107,7 +107,11 @@ namespace Amakeng
             root.name = "[GEN] Road";
             root.transform.position = Vector3.zero;
 
-            var shader = Shader.Find("Universal Render Pipeline/Lit");
+            // HDRP migration (Task 1): HDRP/Lit's base-color texture property is
+            // _BaseColorMap (URP/Lit's is _BaseMap); smoothness/metallic stay at the shader's
+            // matte defaults (both 0) - unchanged behaviour, just the correct property name
+            // for the new shader.
+            var shader = Shader.Find("HDRP/Lit");
             var gravel = new Material(shader) { color = new Color(0.45f, 0.42f, 0.38f) };
             var gravelTex = MakeGravelTexture(false);
             gravel.mainTexture = gravelTex;
@@ -122,11 +126,11 @@ namespace Amakeng
             gravelTex.name = "GravelTex";
             AssetDatabase.AddObjectToAsset(gravelTex, gravel);
             gravel.mainTexture = gravelTex;
-            gravel.SetTexture("_BaseMap", gravelTex);
+            gravel.SetTexture("_BaseColorMap", gravelTex);
             provTex.name = "GravelProvisionalTex";
             AssetDatabase.AddObjectToAsset(provTex, prov);
             prov.mainTexture = provTex;
-            prov.SetTexture("_BaseMap", provTex);
+            prov.SetTexture("_BaseColorMap", provTex);
             AssetDatabase.SaveAssets();
 
             foreach (var mf in root.GetComponentsInChildren<MeshFilter>())

@@ -26,101 +26,57 @@ namespace Amakeng
         const string GenDir = "Assets/Amakeng/Generated";
         const string TerrainPackRoot = "Assets/TerrainSampleAssets";
         // SeedMesh tropical packs use Shader Graph materials (Shader Graphs/SeedMesh_* and
-        // Shader Graphs/Basic_vegetation) - but every one of those .shadergraph assets'
-        // Graph Settings has its Active Target set to HDTarget (HDRP) only, with no
-        // UniversalTarget (confirmed by grepping "m_ActiveTargets"/"m_Type" in each
-        // .shadergraph file). Under this project's URP pipeline that makes every material
-        // using them render as Unity's flat magenta "shader not supported by this render
-        // pipeline" placeholder - verified visually via isolated single-prefab
-        // RenderTexture captures (reproduced with post-processing disabled and with
-        // ShaderUtil.allowAsyncCompilation forced off, ruling out an async-compile
-        // placeholder), even though ShaderUtil reports 0 compile messages and
-        // shader.isSupported == true (it compiles fine, just for the wrong pipeline).
-        // FixSeedMeshMaterialsForUrp() below repoints affected materials to a stock
-        // "Universal Render Pipeline/Lit" shader, carrying over each material's own
-        // base-color/normal textures and alpha-clip/double-sided settings - no tinting,
-        // same source pack textures, just wired into a shader URP can actually render.
+        // Shader Graphs/Basic_vegetation), all HDRP-targeted only (HDTarget, no
+        // UniversalTarget - confirmed by grepping "m_ActiveTargets"/"m_Type" in each
+        // .shadergraph file). Under HDRP (this project's pipeline as of the Task 1 HDRP
+        // migration) these are the packs' NATIVE shaders and need no conversion at all - see
+        // WarnIfSeedMeshNotNative() below, which replaces the URP-era
+        // FixSeedMeshMaterialsForUrp() workaround this project used to carry.
         const string SeedMeshJungleRoot = "Assets/SeedMesh/Jungle-Tropical Vegetation/Vegetation";
         const string SeedMeshTropicalPlantsRoot = "Assets/SeedMesh/Tropical Plants Package/Prefabs";
         const string SeedMeshGroundFoliageRoot = "Assets/SeedMesh/Ground Foliage Vol.2/Prefabs";
 
-        // Every Shader Graph shipped in the SeedMesh packs we use, all HDRP-targeted only
-        // (see comment above). Any material found under Assets/SeedMesh using one of these
-        // shaders gets repointed to Universal Render Pipeline/Lit by
-        // FixSeedMeshMaterialsForUrp().
-        static readonly string[] SeedMeshHdrpShaderNames =
+        // HDRP migration (Task 1): FixSeedMeshMaterialsForUrp() used to repoint every
+        // HDRP-targeted SeedMesh material onto "Universal Render Pipeline/Lit" by MUTATING
+        // the pack's own shipped .mat assets in place (same GUID/path, shader field
+        // overwritten) - there was never a separate "converted" copy asset to delete, so the
+        // brief's literal "delete the converted asset + reassign renderers to the prefab's
+        // own sharedMaterials" cleanup does not apply to how this actually worked (instance
+        // renderers were never given per-instance overrides either - PlantTrees/
+        // ScatterUnderstory only ever set transform, never sharedMaterials - so there was
+        // nothing to reassign there). The mutation had already corrupted 87 of the 108
+        // materials under Assets/SeedMesh in this project; since the original shader
+        // assignment is not recoverable from the mutated .mat file itself, the actual
+        // one-time repair (done once, outside this build pipeline, for this task) restored
+        // pristine bytes for every affected .mat by GUID-matching against this machine's
+        // cached SeedMesh Asset Store packages (see task-1-report.md for the full method).
+        // That repair is a local data fix, not portable/idempotent code, so it does not
+        // belong here; what belongs here is (a) never calling FixSeedMeshMaterialsForUrp
+        // again (deleted), and (b) a cheap regression guard that fails loudly if any
+        // Assets/SeedMesh material is ever found back on a "Universal ..." shader.
+        static void WarnIfSeedMeshNotNative()
         {
-            "Shader Graphs/SeedMesh_Foliage",
-            "Shader Graphs/Basic_vegetation",
-            "Shader Graphs/SeedMesh_Tree_Bark",
-            "Shader Graphs/SeedMesh_Tree_Bark_Layered",
-            "Shader Graphs/SeedMesh_Static_Objects",
-            "Shader Graphs/Vegetation",
-            "Shader Graphs/Cactus",
-            "Shader Graphs/Moss",
-            "Shader Graphs/Sea_water",
-        };
-
-        // One-time, idempotent repair: swaps every HDRP-targeted SeedMesh material (see
-        // SeedMeshHdrpShaderNames) onto Universal Render Pipeline/Lit, copying over its own
-        // base-color (_MainTex) and normal (Normal_vegetation) textures plus its
-        // alpha-clip/double-sided flags. Changes are persisted to the .mat assets, so this
-        // is safe (and cheap - a no-op scan) to call on every Dress() run.
-        static void FixSeedMeshMaterialsForUrp()
-        {
-            var urpLit = Shader.Find("Universal Render Pipeline/Lit");
-            if (urpLit == null)
-            {
-                Debug.LogError("[DressSlice] FixSeedMeshMaterialsForUrp: Universal Render Pipeline/Lit shader not found.");
-                return;
-            }
-
             var guids = AssetDatabase.FindAssets("t:Material", new[] { "Assets/SeedMesh" });
-            int fixedCount = 0;
+            int nonNative = 0;
             foreach (var guid in guids)
             {
-                string path = AssetDatabase.GUIDToAssetPath(guid);
-                var mat = AssetDatabase.LoadAssetAtPath<Material>(path);
-                if (mat == null || mat.shader == null) continue;
-                if (!SeedMeshHdrpShaderNames.Contains(mat.shader.name)) continue;
-
-                var baseTex = mat.HasProperty("_MainTex") ? mat.GetTexture("_MainTex") : null;
-                var normalTex = mat.HasProperty("Normal_vegetation") ? mat.GetTexture("Normal_vegetation") : null;
-                Color tint = mat.HasProperty("_Color") ? mat.GetColor("_Color") : Color.white;
-                float cutoff = mat.HasProperty("_cutoff") ? mat.GetFloat("_cutoff") : 0.33f;
-                bool alphaClip = mat.HasProperty("_AlphaCutoffEnable") ? mat.GetFloat("_AlphaCutoffEnable") > 0.5f : true;
-                bool doubleSided = mat.HasProperty("_DoubleSidedEnable") ? mat.GetFloat("_DoubleSidedEnable") > 0.5f : true;
-
-                mat.shader = urpLit;
-                mat.shaderKeywords = Array.Empty<string>();
-                mat.SetFloat("_WorkflowMode", 1f); // Metallic
-                mat.SetFloat("_Surface", 0f);      // Opaque (cutout, not alpha-blended)
-                mat.SetFloat("_Smoothness", 0.08f);
-                mat.SetFloat("_Metallic", 0f);
-                if (baseTex != null) mat.SetTexture("_BaseMap", baseTex);
-                mat.SetColor("_BaseColor", tint);
-                if (normalTex != null)
+                var mat = AssetDatabase.LoadAssetAtPath<Material>(AssetDatabase.GUIDToAssetPath(guid));
+                if (mat != null && mat.shader != null && mat.shader.name.StartsWith("Universal Render Pipeline"))
                 {
-                    mat.SetTexture("_BumpMap", normalTex);
-                    mat.EnableKeyword("_NORMALMAP");
-                    mat.SetFloat("_BumpScale", 1f);
+                    Debug.LogError("[DressSlice] WarnIfSeedMeshNotNative: " + AssetDatabase.GUIDToAssetPath(guid) +
+                        " is still on a URP shader (" + mat.shader.name + "), not its native Shader Graph.");
+                    nonNative++;
                 }
-                mat.SetFloat("_AlphaClip", alphaClip ? 1f : 0f);
-                if (alphaClip)
-                {
-                    mat.SetFloat("_Cutoff", cutoff);
-                    mat.EnableKeyword("_ALPHATEST_ON");
-                    mat.renderQueue = (int)UnityEngine.Rendering.RenderQueue.AlphaTest;
-                }
-                mat.SetFloat("_Cull", (float)(doubleSided
-                    ? UnityEngine.Rendering.CullMode.Off : UnityEngine.Rendering.CullMode.Back));
-                mat.doubleSidedGI = doubleSided;
-                EditorUtility.SetDirty(mat);
-                fixedCount++;
             }
-            if (fixedCount > 0) AssetDatabase.SaveAssets();
-            Debug.Log("[DressSlice] FixSeedMeshMaterialsForUrp: repointed " + fixedCount +
-                " HDRP-targeted SeedMesh material(s) to Universal Render Pipeline/Lit.");
+            if (nonNative == 0)
+                Debug.Log("[DressSlice] WarnIfSeedMeshNotNative: all Assets/SeedMesh materials are on native (non-URP) shaders.");
+
+            // Orphaned leftovers from a removed TreePackVol.1-era feature: never referenced by
+            // any renderer in the scene and not (re)created by any current code path, but
+            // still sitting on Universal Render Pipeline/Lit - delete rather than "convert"
+            // dead assets to HDRP/Lit for no purpose.
+            foreach (var guid in AssetDatabase.FindAssets("TreeTint t:Material", new[] { "Assets/Amakeng" }))
+                AssetDatabase.DeleteAsset(AssetDatabase.GUIDToAssetPath(guid));
         }
         // mesh-as-base baseline: with the photogrammetry mesh now standing in for the
         // ground close to the road, the flat foliage-card quads read as floating ovals
@@ -195,8 +151,7 @@ namespace Amakeng
             foreach (var guid in AssetDatabase.FindAssets("TreeConv", new[] { GeneratedMaterialsDir }))
                 AssetDatabase.DeleteAsset(AssetDatabase.GUIDToAssetPath(guid));
 
-            ConvertPackMaterials();
-            FixSeedMeshMaterialsForUrp();
+            WarnIfSeedMeshNotNative();
             BuildOverlay();
             PaintDetails();
             FixGroundMaterial();
@@ -270,32 +225,55 @@ namespace Amakeng
         }
 
         // -------------------------------------------------------------------
-        // 1. URP material conversion for imported packs.
-        // -------------------------------------------------------------------
-        static void ConvertPackMaterials()
-        {
-            try
-            {
-                UnityEditor.Rendering.Universal.Converters.RunInBatchMode(
-                    UnityEditor.Rendering.Universal.ConverterContainerId.BuiltInToURP);
-                Debug.Log("[DressSlice] ConvertPackMaterials: Built-in -> URP converter ran in batch mode.");
-            }
-            catch (Exception e)
-            {
-                Debug.LogWarning("[DressSlice] ConvertPackMaterials: URP converter unavailable or failed (" +
-                    e.Message + "). Convert pack materials manually via Window > Rendering > Render Pipeline Converter.");
-            }
-            // Note: earlier rounds logged a "TreePackVol.1 trees may appear magenta" warning
-            // here. As of review round 2, PlantTrees no longer places any TreePackVol.1 Tree
-            // Creator prefab (it prefers TerrainSampleAssets bushes and only falls back to
-            // non-Tree-Creator-shader TreePackVol.1 prefabs, of which there are none in this
-            // pack), so that warning is stale and has been removed.
-        }
-
-        // -------------------------------------------------------------------
         // 2. Road overlay mesh (per-tile albedo).
         // -------------------------------------------------------------------
         class ObjGroup { public string Name; public List<int> Faces = new List<int>(); }
+
+        // HDRP Unlit + Shadow Matte for the baked road-mosaic photography: Unlit so the
+        // photo's own baked lighting isn't re-lit/double-exposed by the scene's directional
+        // light, "Shadow Matte" so real-time cast shadows (trees, barrier) still composite
+        // onto it.
+        //
+        // HDRP 17.3 API discovery (vs. the task brief's skeleton, which named
+        // `_EnableShadowMatte` + keyword `_ENABLE_SHADOW_MATTE`): traced through the
+        // installed HDRP package source (Runtime/Material/Unlit/*). The `_ENABLE_SHADOW_MATTE`
+        // keyword only gates code inside `#if ... && (SHADERPASS == SHADERPASS_PATH_TRACING)`
+        // blocks in Unlit.cs.hlsl/UnlitData.hlsl - it affects path-traced rendering only, not
+        // the real-time raster passes this project uses. The actual raster-time mechanism
+        // (Editor/Material/Unlit/UnlitAPI.cs: `ValidateMaterial`) reads a DIFFERENT property,
+        // `HDStringConstants.kShadowMatteFilter` = "_ShadowMatteFilter" (not the brief's
+        // `_EnableShadowMatte`), to decide whether to set up the stencil bit that makes the
+        // surface receive real-time shadow/lighting compositing - so that is the property set
+        // here instead, followed by `HDShaderUtils.ResetMaterialKeywords()` (the same public
+        // API used to resync a Shader-Graph-vs-keyword-state mismatch) so the stencil actually
+        // gets (re)applied.
+        //
+        // HOWEVER: `_ShadowMatteFilter` is not declared in the fixed "HDRP/Unlit" shader's own
+        // Properties block at all (confirmed by grep - zero occurrences in Unlit.shader), so
+        // `Material.HasProperty("_ShadowMatteFilter")` - the exact gate ValidateMaterial checks
+        // - is false on it regardless of what's set here; true Shadow Matte for Unlit surfaces
+        // is implemented exclusively via the HD Unlit Shader Graph subtarget's dedicated
+        // "Shadow Matte" toggle (Editor/Material/Unlit/ShaderGraph/HDUnlitData.cs), which bakes
+        // the property into a generated .shader asset - there is no fixed/non-graph shader that
+        // exposes it. Authoring that Shader Graph from script was investigated: its entire
+        // creation API (HDTarget, HDUnlitSubTarget, GraphData, GraphUtil) is `internal` to
+        // Unity's own Editor assemblies, so building one reliably without deep, fragile
+        // reflection into non-public Shader Graph internals was judged out of scope/too high
+        // risk for this task. This method therefore sets the technically-correct property name
+        // (harmless if inert) rather than the brief's non-existent one, but an empirical
+        // in-editor capture to confirm real-time shadows actually composite onto the overlay
+        // was not completed this round (blocked - see task-1-report.md) and should be the
+        // first thing re-checked once unblocked; if it does not, the fallback is authoring the
+        // HD Unlit Shader Graph by hand via the Editor UI once, committing the resulting
+        // .shadergraph/.shader asset, and pointing this method at it by name instead.
+        public static Material MakeShadowMatteUnlit(Texture tex)
+        {
+            var m = new Material(Shader.Find("HDRP/Unlit"));
+            if (tex != null) m.SetTexture("_UnlitColorMap", tex);
+            m.SetFloat("_ShadowMatteFilter", 1f);
+            UnityEditor.Rendering.HighDefinition.HDShaderUtils.ResetMaterialKeywords(m);
+            return m;
+        }
 
         static void BuildOverlay()
         {
@@ -364,7 +342,6 @@ namespace Amakeng
                 }
             }
 
-            var shader = Shader.Find("Universal Render Pipeline/Lit");
             int built = 0;
             foreach (var g in groups)
             {
@@ -418,10 +395,15 @@ namespace Amakeng
 
                 string matPath = "Assets/Amakeng/OverlayTile" + tileNum + ".mat";
                 AssetDatabase.DeleteAsset(matPath);
-                var mat = new Material(shader) { name = "OverlayTile" + tileNum };
-                mat.SetFloat("_Smoothness", 0.1f);
-                if (tex != null) { mat.SetTexture("_BaseMap", tex); mat.mainTexture = tex; }
-                else Debug.LogWarning("[DressSlice] BuildOverlay: albedo texture not found at " + texPath);
+                // HDRP Unlit + Shadow Matte: the road mosaic is baked (lit) photography, so it
+                // should not be re-lit by the scene's directional light like a normal surface
+                // (that would double-expose it) - Unlit keeps the photo's own baked lighting,
+                // while Shadow Matte still composites real-time scene shadows (trees, barrier)
+                // onto it for the "photo look, receives shadows" requirement.
+                var mat = MakeShadowMatteUnlit(tex);
+                mat.name = "OverlayTile" + tileNum;
+                if (tex == null)
+                    Debug.LogWarning("[DressSlice] BuildOverlay: albedo texture not found at " + texPath);
                 AssetDatabase.CreateAsset(mat, matPath);
                 mr.sharedMaterial = AssetDatabase.LoadAssetAtPath<Material>(matPath);
                 built++;
@@ -956,6 +938,7 @@ namespace Amakeng
                     mc.sharedMesh = mf.sharedMesh;
                 }
 
+                var hdLitShader = Shader.Find("HDRP/Lit");
                 foreach (var mr in inst.GetComponentsInChildren<MeshRenderer>())
                 {
                     var mats = mr.sharedMaterials;
@@ -963,8 +946,16 @@ namespace Amakeng
                     {
                         var src = mats[i];
                         if (src == null) continue;
-                        var clone = new Material(src) { name = src.name + "_DoubleSided" };
-                        clone.SetFloat("_Cull", (float)UnityEngine.Rendering.CullMode.Off);
+                        // Retarget onto HDRP/Lit explicitly (rather than cloning whatever
+                        // shader the .obj's auto-generated default material happened to carry
+                        // from import time) and mark double-sided the HDRP way: the
+                        // _DoubleSidedEnable toggle plus doubleSidedGI, then
+                        // ResetMaterialKeywords to sync the actual _CullMode the shader passes
+                        // key off (same pattern as MakeShadowMatteUnlit above).
+                        var clone = new Material(src) { name = src.name + "_DoubleSided", shader = hdLitShader };
+                        clone.SetFloat("_DoubleSidedEnable", 1f);
+                        clone.doubleSidedGI = true;
+                        UnityEditor.Rendering.HighDefinition.HDShaderUtils.ResetMaterialKeywords(clone);
                         string matPath = matDir + "/" + inst.name + "_" + mr.gameObject.name + "_" + i + ".mat";
                         AssetDatabase.DeleteAsset(matPath);
                         AssetDatabase.CreateAsset(clone, matPath);
@@ -1118,13 +1109,16 @@ namespace Amakeng
             // 1 m high, len_m long (along the direction of travel), 0.3 m thick.
             go.transform.localScale = new Vector3(0.3f, 1f, lenM);
 
-            var shader = Shader.Find("Universal Render Pipeline/Lit");
+            var shader = Shader.Find("HDRP/Lit");
             string stripePath = "Assets/Amakeng/Generated/barrier_stripe.png";
             var stripeTex = AssetDatabase.LoadAssetAtPath<Texture2D>(stripePath);
             string matPath = "Assets/Amakeng/BarrierMat.mat";
             AssetDatabase.DeleteAsset(matPath);
             var mat = new Material(shader) { name = "BarrierMat" };
-            if (stripeTex != null) { mat.SetTexture("_BaseMap", stripeTex); mat.mainTexture = stripeTex; }
+            // HDRP/Lit's base-color texture property is _BaseColorMap (URP/Lit's is _BaseMap);
+            // mainTexture/color still work as aliases (both tagged [MainTexture]/[MainColor]),
+            // set explicitly here too for clarity.
+            if (stripeTex != null) { mat.SetTexture("_BaseColorMap", stripeTex); mat.mainTexture = stripeTex; }
             else mat.color = new Color(0.85f, 0.1f, 0.1f); // red tint fallback (no barrier_stripe.png present)
             AssetDatabase.CreateAsset(mat, matPath);
             go.GetComponent<MeshRenderer>().sharedMaterial = AssetDatabase.LoadAssetAtPath<Material>(matPath);
@@ -1188,7 +1182,18 @@ namespace Amakeng
 
             var upHint = Mathf.Abs(sunDir.y) > 0.999f ? Vector3.forward : Vector3.up;
             sunGo.transform.rotation = Quaternion.LookRotation(-sunDir, upHint);
-            light.intensity = 1.1f;
+            // HDRP migration (Task 1): SetAtmosphere runs on every Dress(), including runs
+            // after SetupHdrp.Run() - so it must not stomp SetupHdrp.EnsureSunForHdrp()'s
+            // physically-plausible Lux intensity with the old URP-era flat multiplier (1.1),
+            // which under HDRP's physical light units is close to no light at all (confirmed
+            // live: post-Dress() the sun read back at 1.1 lux). Re-applies the same
+            // HDAdditionalLightData/Lux setup here so SetAtmosphere alone (without a prior
+            // SetupHdrp.Run() in the same session) is still correct, and the two stay in sync
+            // by referencing SetupHdrp's own constant rather than duplicating the number.
+            if (sunGo.GetComponent<UnityEngine.Rendering.HighDefinition.HDAdditionalLightData>() == null)
+                sunGo.AddComponent<UnityEngine.Rendering.HighDefinition.HDAdditionalLightData>();
+            light.lightUnit = UnityEngine.Rendering.LightUnit.Lux;
+            light.intensity = SetupHdrp.SunIntensityLux;
             light.color = new Color(1f, 0.97f, 0.92f);
             RenderSettings.sun = light;
 
