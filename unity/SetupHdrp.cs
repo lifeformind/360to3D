@@ -76,6 +76,29 @@ namespace Amakeng
         // the sky/highlights from clipping.
         public const float FixedExposureEv100 = 13.0f;
 
+        // Task 4 grading round 3 (final; see task-4-report.md): under Linear/HDRP + ACES the
+        // untuned scene read with two opposite defects at once vs. the video reference frames
+        // (ref_s475/546/650.png) - road surface over-bright/washed (baseline delta vs. ref up
+        // to +31-47% per channel) while the canopy/rock foliage masses read far too dark
+        // (baseline delta down to -65%). Both symptoms share one cause: the physically-lit
+        // scene's dynamic range is wider than the reference photography's, so a single global
+        // contrast reduction (ColorAdjustments.contrast) compresses both ends at once - it was
+        // the single highest-leverage knob, more effective than Exposure alone (which moves
+        // both problems the same direction instead of squeezing them together). Chosen over 3
+        // empirically-measured rounds (grade_r0..r4_s*.png + grade_compare.py mean-RGB deltas
+        // in this report's folder): contrast -45 + saturation +18 (compensates for the
+        // flatter, less vivid look contrast reduction alone produces) + a slightly warm
+        // colorFilter (cuts the ambient-sky blue cast Physically Based Sky adds to shadowed
+        // foliage) + a small +0.15 EV postExposure trim. Final deltas: road within ~10-20% per
+        // channel of reference at 2 of 3 stations (s475/s546), foliage no longer lime/red-
+        // shifted (hue corrected) though still under-bright at one heavily-shadowed canopy
+        // station (s650) - see task-4-report.md for the full per-round numbers and the
+        // decision to stop at round 3 rather than keep chasing a single outlier station.
+        public const float GradeContrast = -45f;
+        public const float GradeSaturation = 18f;
+        public static readonly Color GradeColorFilter = new Color(1.05f, 1.0f, 0.90f);
+        public const float GradePostExposureEv = 0.15f;
+
         [MenuItem("Amakeng/Setup HDRP")]
         public static void Run()
         {
@@ -202,7 +225,15 @@ namespace Amakeng
             exp.mode.Override(ExposureMode.Fixed);
             exp.fixedExposure.Override(FixedExposureEv100);
 
-            var color = profile.Add<ColorAdjustments>(true); // neutral defaults; Task 4 tunes
+            var color = profile.Add<ColorAdjustments>(true);
+            // Task 4 grading (see constants above + task-4-report.md): baked in as the new
+            // defaults so a future SetupHdrp.Run() (which deletes/recreates this profile every
+            // time - see BuildAtmosphereVolume's own doc comment) does not silently wipe the
+            // grading tuning back to neutral.
+            color.contrast.Override(GradeContrast);
+            color.saturation.Override(GradeSaturation);
+            color.colorFilter.Override(GradeColorFilter);
+            color.postExposure.Override(GradePostExposureEv);
 
             // Not in the brief's skeleton, but required: HDRP's Tonemapping volume component
             // defaults to TonemappingMode.None (confirmed in package source), i.e. no
@@ -228,7 +259,9 @@ namespace Amakeng
             AssetDatabase.SaveAssets();
 
             Debug.Log("[SetupHdrp] BuildAtmosphereVolume: PhysicallyBasedSky + Fog(meanFreePath=250) + " +
-                "Exposure(Fixed, " + FixedExposureEv100 + " EV100) + neutral ColorAdjustments + Tonemapping(ACES).");
+                "Exposure(Fixed, " + FixedExposureEv100 + " EV100) + ColorAdjustments(Task 4 grading: contrast=" +
+                GradeContrast + " saturation=" + GradeSaturation + " colorFilter=" + GradeColorFilter +
+                " postExposure=" + GradePostExposureEv + ") + Tonemapping(ACES).");
         }
 
         // Discovery #4 (see file header): intensity/unit live on the stock Light component;

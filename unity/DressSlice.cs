@@ -632,16 +632,25 @@ namespace Amakeng
             // Force uncompressed, unscaled, readable import: the default import settings
             // downscale this NPOT mask (e.g. 767x319 -> 512x256), which would silently
             // misalign the world<->pixel mapping below if left as-is.
+            // Task 4 sRGB audit: density.png is a raw grayscale density value (0..1 encoded
+            // linearly as byte/255), not photographic colour - Unity's default importer
+            // guessed sRGB=true for it (same as every other PNG). Under Linear color space
+            // (HDRP) that makes GetPixels() decode the stored bytes through the sRGB EOTF
+            // before this code reads .grayscale, non-linearly darkening mid density values
+            // (e.g. a raw 0.50 reads back as ~0.21) and skewing the grass/fern density curve.
+            // This mask is data, not colour, so it must be imported as sRGB=false (Linear).
             var imp = AssetImporter.GetAtPath(relPng) as TextureImporter;
             if (imp != null && (!imp.isReadable || imp.npotScale != TextureImporterNPOTScale.None ||
                 imp.maxTextureSize < Mathf.Max(meta.width, meta.height) ||
-                imp.textureCompression != TextureImporterCompression.Uncompressed))
+                imp.textureCompression != TextureImporterCompression.Uncompressed ||
+                imp.sRGBTexture))
             {
                 imp.isReadable = true;
                 imp.npotScale = TextureImporterNPOTScale.None;
                 imp.maxTextureSize = Mathf.Max(2048, Mathf.NextPowerOfTwo(Mathf.Max(meta.width, meta.height)));
                 imp.textureCompression = TextureImporterCompression.Uncompressed;
                 imp.mipmapEnabled = false;
+                imp.sRGBTexture = false;
                 imp.SaveAndReimport();
             }
             var tex = AssetDatabase.LoadAssetAtPath<Texture2D>(relPng);
