@@ -1,5 +1,8 @@
-// Dresses the vertical-slice scene: road overlay, verge grass/fern detail, trees, foliage
-// cards, backdrop mountains, barrier, sun + fog. Menu: Amakeng > Dress Slice.
+// Dresses the vertical-slice scene: road overlay, verge grass/fern detail, layered forest
+// (PlantForest, stage-75 placements), foliage cards, backdrop mountains, barrier, sun.
+// Atmosphere (sky/fog/exposure) is owned by SetupHdrp's [GEN] Atmosphere volume - Dress()
+// only rotates the sun (NOAA position) and keeps its HDRP Lux intensity in sync, it does not
+// write any RenderSettings.fog/sky. Menu: Amakeng > Dress Slice.
 // Idempotent: every step deletes/replaces its own [GEN] Slice child (or TerrainData layer)
 // before rebuilding, so re-running Dress() after re-syncing exports is always safe.
 using System;
@@ -7,6 +10,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -20,6 +24,125 @@ namespace Amakeng
     [Serializable] public class SliceExtras { public BarrierExtra barrier; }
     [Serializable] public class CenterlineStation { public float s, x, y, z, tx, ty, w; public bool provisional; }
     [Serializable] public class CenterlineRoot { public float z0, px_per_m; public CenterlineStation[] stations; }
+
+    // Minimal MiniJson-style recursive-descent parser (object -> Dictionary<string,object>,
+    // array -> List<object>, number -> double, string -> string, true/false -> bool, null ->
+    // null). export/forest_placements.json nests one level deeper than JsonUtility's existing
+    // callers in this file handle (chunks[].plants[].{layer,x,y,h,yaw,scale} - an array of
+    // objects each containing another array of objects, mixing a string field with floats) -
+    // JsonUtility's FromJson<T> requires the whole shape to be declared as concrete
+    // [Serializable] C# types up front and has known unreliable edge cases on nested
+    // float-bearing object arrays, so PlantForest walks this generic parse result directly
+    // instead (same "manual parse, don't trust JsonUtility for this shape" spirit as
+    // ParseStations() below, generalized rather than hand-indexed since the schema nests
+    // deeper than a single flat array).
+    static class MiniJson
+    {
+        public static object Parse(string json)
+        {
+            int i = 0;
+            return ParseValue(json, ref i);
+        }
+
+        static void SkipWs(string s, ref int i)
+        {
+            while (i < s.Length && char.IsWhiteSpace(s[i])) i++;
+        }
+
+        static object ParseValue(string s, ref int i)
+        {
+            SkipWs(s, ref i);
+            char c = s[i];
+            if (c == '{') return ParseObject(s, ref i);
+            if (c == '[') return ParseArray(s, ref i);
+            if (c == '"') return ParseString(s, ref i);
+            if (c == 't') { i += 4; return true; }
+            if (c == 'f') { i += 5; return false; }
+            if (c == 'n') { i += 4; return null; }
+            return ParseNumber(s, ref i);
+        }
+
+        static Dictionary<string, object> ParseObject(string s, ref int i)
+        {
+            var d = new Dictionary<string, object>();
+            i++; // '{'
+            SkipWs(s, ref i);
+            if (s[i] == '}') { i++; return d; }
+            while (true)
+            {
+                SkipWs(s, ref i);
+                string key = ParseString(s, ref i);
+                SkipWs(s, ref i);
+                i++; // ':'
+                d[key] = ParseValue(s, ref i);
+                SkipWs(s, ref i);
+                if (s[i] == ',') { i++; continue; }
+                i++; // '}'
+                break;
+            }
+            return d;
+        }
+
+        static List<object> ParseArray(string s, ref int i)
+        {
+            var l = new List<object>();
+            i++; // '['
+            SkipWs(s, ref i);
+            if (s[i] == ']') { i++; return l; }
+            while (true)
+            {
+                l.Add(ParseValue(s, ref i));
+                SkipWs(s, ref i);
+                if (s[i] == ',') { i++; continue; }
+                i++; // ']'
+                break;
+            }
+            return l;
+        }
+
+        static string ParseString(string s, ref int i)
+        {
+            i++; // opening quote
+            var sb = new StringBuilder();
+            while (s[i] != '"')
+            {
+                if (s[i] == '\\')
+                {
+                    i++;
+                    char e = s[i];
+                    switch (e)
+                    {
+                        case 'n': sb.Append('\n'); break;
+                        case 't': sb.Append('\t'); break;
+                        case 'r': sb.Append('\r'); break;
+                        case 'b': sb.Append('\b'); break;
+                        case 'f': sb.Append('\f'); break;
+                        case '"': sb.Append('"'); break;
+                        case '\\': sb.Append('\\'); break;
+                        case '/': sb.Append('/'); break;
+                        case 'u':
+                            int code = int.Parse(s.Substring(i + 1, 4), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+                            sb.Append((char)code);
+                            i += 4;
+                            break;
+                        default: sb.Append(e); break;
+                    }
+                    i++;
+                }
+                else { sb.Append(s[i]); i++; }
+            }
+            i++; // closing quote
+            return sb.ToString();
+        }
+
+        static object ParseNumber(string s, ref int i)
+        {
+            int start = i;
+            while (i < s.Length && (char.IsDigit(s[i]) || s[i] == '-' || s[i] == '+' ||
+                s[i] == '.' || s[i] == 'e' || s[i] == 'E')) i++;
+            return double.Parse(s.Substring(start, i - start), CultureInfo.InvariantCulture);
+        }
+    }
 
     public static class DressSlice
     {
@@ -139,8 +262,10 @@ namespace Amakeng
             var scene = EditorSceneManager.OpenScene(BuildAmakeng.ScenePath, OpenSceneMode.Single);
 
             // Cleanup: remove the ad hoc "[PROBE] Trees" group used to hand-prove the
-            // TreePackVol.1 URP material conversion recipe before it was wired into
-            // PlantTrees (that recipe is no longer used - see PlantTrees' header comment).
+            // TreePackVol.1 URP material conversion recipe before it was wired into the
+            // (since-removed) PlantTrees - that whole conversion path is gone along with the
+            // TreePackVol.1 pack itself; SeedMesh needs no such conversion (see
+            // WarnIfSeedMeshNotNative below).
             var probeTrees = GameObject.Find("[PROBE] Trees");
             if (probeTrees != null) UnityEngine.Object.DestroyImmediate(probeTrees);
 
@@ -159,8 +284,7 @@ namespace Amakeng
             BuildOverlay();
             PaintDetails();
             FixGroundMaterial();
-            PlantTrees();
-            ScatterUnderstory();
+            PlantForest();
             PlaceCards();
             ImportBackdrop();
             PlaceBarrier();
@@ -197,6 +321,32 @@ namespace Amakeng
             var go = new GameObject(name);
             go.transform.SetParent(parent.transform, false);
             return go;
+        }
+
+        // Like ReplaceChild, but for a top-level "[GEN] X" root (a sibling of "[GEN] Slice"/
+        // "[GEN] Terrain", not nested under either) - PlantForest's own [GEN] Forest root uses
+        // this rather than ReplaceChild(GetSliceRoot(), ...) since the brief names it "[GEN]
+        // Forest" (the same top-level naming convention as "[GEN] Terrain"), not "Forest" as a
+        // child of "[GEN] Slice" (the convention the removed PlantTrees/ScatterUnderstory used
+        // for their "Trees"/"Understory" children). Full delete+recreate (not per-child
+        // ReplaceChild) is correct here: PlantForest has no sub-state worth preserving between
+        // runs, and this guarantees stale chunk_NNN children from a previous placements.json
+        // (different chunk count/names) never linger.
+        static GameObject ReplaceRoot(string name)
+        {
+            var existing = GameObject.Find(name);
+            if (existing != null) UnityEngine.Object.DestroyImmediate(existing);
+            return new GameObject(name);
+        }
+
+        // Marks an instantiated placement (and all its children - SeedMesh prefabs are often
+        // multi-renderer hierarchies) static, satisfying the "all instances static-flagged"
+        // requirement (batching/GI/occlusion eligible - these are fixed set-dressing, never
+        // move at runtime).
+        static void MarkStaticRecursive(Transform t)
+        {
+            t.gameObject.isStatic = true;
+            foreach (Transform child in t) MarkStaticRecursive(child);
         }
 
         static PlacementsRoot LoadPlacements()
@@ -623,200 +773,215 @@ namespace Amakeng
         }
 
         // -------------------------------------------------------------------
-        // 4. Trees (foliage_cards placements): SeedMesh tropical packs, all Shader Graph/
-        // URP-native - no material conversion needed (that whole machinery, built for the
-        // Tree Creator-shader TreePackVol.1, is gone along with the pack - see Dress()'s
-        // cleanup step and item 3 of the fix report).
-        //   h_raw >  6 m: Dense_Jungle_Tree_Var* (single trees); h_raw >= 12 m prefers
-        //     Background_group_var* (multi-tree clusters - reads as a treeline clump
-        //     rather than one implausibly stretched single tree at that height).
-        //   h_raw <= 6 m: Forest_bush_var*/Common_bush_var* + a mix of Tropical Plants
-        //     prefabs (no tint needed - SeedMesh materials are already correct).
-        // All instances placed as ordinary instantiated GameObjects under
-        // [GEN] Slice/Trees (not Unity's built-in Terrain tree prototypes/instances -
-        // see the round-2 fix report for why that path doesn't work here).
+        // 4. PlantForest: mass layered rainforest planting from stage 75's deterministic,
+        // chunked placements (export/forest_placements.json, synced to Generated/ by
+        // 70_sync_unity.py). Replaces PlantTrees (single foliage-card-driven canopy) +
+        // ScatterUnderstory (a separate dense-band scatter pass) with one placement source
+        // that already encodes 5 layers (canopy/mid/under/ground/wall), a 4-40 m lateral
+        // band, and a >=5.5 m road exclusion (all decided in Python, not here - see
+        // scripts/75_forest.py). All instances are ordinary instantiated GameObjects (not
+        // Terrain tree prototypes - PlantTrees' header comment explains why that path never
+        // worked here), grouped under a top-level "[GEN] Forest" root (sibling of "[GEN]
+        // Slice"/"[GEN] Terrain", per the brief's own naming) with one "chunk_NNN" child per
+        // stage-75 chunk (NNN = that chunk's s0 station, rounded to the metre).
+        //
+        // Pools (discovered once via FindAssets, same DiscoverPrefabs/DiscoverByPrefix
+        // machinery PlantTrees/ScatterUnderstory used):
+        //   canopy (h>=12, stage-75's own classification) -> Background_group_var* (multi-
+        //     tree clusters) when h>=16, else the taller end of Dense_Jungle_Tree_Var*;
+        //     uniformly scaled so the instance's renderer-bounds height reads as h (the same
+        //     MeasureHeight-baseline approach PlantTrees used).
+        //   mid (6<=h<12) -> Dense_Jungle_Tree_Var* + Banana_tree_group, same h-scaling.
+        //   under (1.5<=h<6) -> Forest_bush_var*/Common_bush_var* + Tropical Plants Package
+        //     (minus Pot_* props - DiscoverTropicalPlantsMix already excludes those).
+        //   ground (<1.5, mostly ground cover - h here is just a locally-sampled canopy
+        //     reading, not a target height; stage-75 can emit large h values for "ground" at
+        //     spots directly under tall canopy, so ground/under/wall are deliberately NOT
+        //     h-scaled) -> Ground Foliage Vol.2, minus the Forest_bush/Common_bush entries
+        //     already reserved for "under" (keeps the two pools thematically distinct: low
+        //     ground cover vs. knee/waist-height bushes).
+        //   wall (canopy-edge creepers) -> Climbing_plants_var* + Hanging_vegetation_var*.
+        // under/ground/wall use "native scale x placement.scale": the instance's localScale
+        // is the prefab's own authored localScale (its "native" size) times the placement's
+        // scale jitter, not normalized against h - matching the brief's pool table exactly.
+        //
+        // Pool pick is deterministic per placement (stable across runs/machines, not seeded
+        // by iteration order): index = floor(x*7 + y*13) mod pool size, floored (not C#'s
+        // truncating (int) cast, which rounds negative values toward zero rather than down -
+        // these placements' y is always negative, ENU south of the anchor) and normalized
+        // non-negative - see DeterministicPoolIndex.
         // -------------------------------------------------------------------
-        const float BackgroundGroupMinHRaw = 12f;
+        const float ForestCanopyGroupMinH = 16f;
 
-        static void PlantTrees()
+        static int DeterministicPoolIndex(float x, float y, int poolSize)
         {
-            var treesRoot = ReplaceChild(GetSliceRoot(), "Trees");
+            int raw = Mathf.FloorToInt(x * 7f + y * 13f);
+            int idx = raw % poolSize;
+            if (idx < 0) idx += poolSize;
+            return idx;
+        }
+
+        static GameObject PickFromPool(List<GameObject> pool, float x, float y) =>
+            pool.Count == 0 ? null : pool[DeterministicPoolIndex(x, y, pool.Count)];
+
+        static float AsFloat(object o) => Convert.ToSingle(o, CultureInfo.InvariantCulture);
+
+        static void PlantForest()
+        {
+            var forestRoot = ReplaceRoot("[GEN] Forest");
 
             var terrGo = GameObject.Find("[GEN] Terrain");
             if (terrGo == null)
             {
-                Debug.LogError("[DressSlice] PlantTrees: [GEN] Terrain not found; run Amakeng/Build Scene first.");
+                Debug.LogError("[DressSlice] PlantForest: [GEN] Terrain not found; run Amakeng/Build Scene first.");
                 return;
             }
             var terrain = terrGo.GetComponent<Terrain>();
-            // Idempotency: clear any Terrain tree prototypes/instances left over from
-            // before the round-2 fix (PlantTrees no longer populates terrainData.
-            // treePrototypes / SetTreeInstances). Instances must be cleared BEFORE
-            // prototypes, or Unity logs "Tree removed: invalid prototype N" while the
-            // (now-empty) prototype list briefly can't satisfy old instances' references.
+            // Idempotency carry-over from the removed PlantTrees: guard against any stale
+            // Terrain tree prototypes/instances from an old scene predating that fix.
+            // Instances must be cleared BEFORE prototypes (else Unity logs "Tree removed:
+            // invalid prototype N" while the now-empty prototype list briefly can't satisfy
+            // old instance references). Cheap no-op once already empty.
             terrain.terrainData.SetTreeInstances(new TreeInstance[0], true);
             terrain.terrainData.treePrototypes = new TreePrototype[0];
 
-            var singleTrees = DiscoverByPrefix(SeedMeshJungleRoot, "Dense_Jungle_Tree_Var");
-            var groupTrees = DiscoverByPrefix(SeedMeshJungleRoot, "Background_group_var");
-            var lowPool = DiscoverByPrefix(SeedMeshGroundFoliageRoot, "Forest_bush_var")
+            string path = Path.Combine(GenDir, "forest_placements.json");
+            if (!File.Exists(path))
+            {
+                Debug.LogError("[DressSlice] PlantForest: missing " + path + " (run 70_sync_unity.py " +
+                    "after scripts/75_forest.py).");
+                return;
+            }
+            var root = MiniJson.Parse(File.ReadAllText(path)) as Dictionary<string, object>;
+            if (root == null || !root.ContainsKey("chunks"))
+            {
+                Debug.LogError("[DressSlice] PlantForest: " + path + " missing a top-level 'chunks' array.");
+                return;
+            }
+
+            var canopyGroupPool = DiscoverByPrefix(SeedMeshJungleRoot, "Background_group_var");
+            var canopyTallPool = DiscoverByPrefix(SeedMeshJungleRoot, "Dense_Jungle_Tree_Var");
+            var midPool = DiscoverByPrefix(SeedMeshJungleRoot, "Dense_Jungle_Tree_Var")
+                .Concat(DiscoverByPrefix(SeedMeshJungleRoot, "Banana_tree_group")).ToList();
+            var underPool = DiscoverByPrefix(SeedMeshGroundFoliageRoot, "Forest_bush_var")
                 .Concat(DiscoverByPrefix(SeedMeshGroundFoliageRoot, "Common_bush_var"))
                 .Concat(DiscoverTropicalPlantsMix()).ToList();
+            var groundPool = DiscoverPrefabs(SeedMeshGroundFoliageRoot, name =>
+                !name.StartsWith("Forest_bush", StringComparison.OrdinalIgnoreCase) &&
+                !name.StartsWith("Common_bush", StringComparison.OrdinalIgnoreCase));
+            var wallPool = DiscoverByPrefix(SeedMeshJungleRoot, "Climbing_plants_var")
+                .Concat(DiscoverByPrefix(SeedMeshJungleRoot, "Hanging_vegetation_var")).ToList();
 
-            if (singleTrees.Count == 0 && groupTrees.Count == 0)
-                Debug.LogError("[DressSlice] PlantTrees: no jungle tree/group prefabs found under " +
-                    SeedMeshJungleRoot + ".");
-            if (lowPool.Count == 0)
-                Debug.LogError("[DressSlice] PlantTrees: no bush/tropical-plant prefabs found under " +
+            if (canopyGroupPool.Count == 0 && canopyTallPool.Count == 0)
+                Debug.LogError("[DressSlice] PlantForest: no canopy prefabs found under " + SeedMeshJungleRoot + ".");
+            if (midPool.Count == 0)
+                Debug.LogError("[DressSlice] PlantForest: no mid-storey prefabs found under " + SeedMeshJungleRoot + ".");
+            if (underPool.Count == 0)
+                Debug.LogError("[DressSlice] PlantForest: no understory prefabs found under " +
                     SeedMeshGroundFoliageRoot + " / " + SeedMeshTropicalPlantsRoot + ".");
-            Debug.Log("[DressSlice] PlantTrees: single trees=" + singleTrees.Count + ", group trees=" +
-                groupTrees.Count + ", low-canopy pool=" + lowPool.Count + " (bush + tropical mix)");
+            if (groundPool.Count == 0)
+                Debug.LogError("[DressSlice] PlantForest: no ground-cover prefabs found under " + SeedMeshGroundFoliageRoot + ".");
+            if (wallPool.Count == 0)
+                Debug.LogError("[DressSlice] PlantForest: no wall/creeper prefabs found under " + SeedMeshJungleRoot + ".");
+            Debug.Log("[DressSlice] PlantForest pools: canopyGroup=" + canopyGroupPool.Count + " canopyTall=" +
+                canopyTallPool.Count + " mid=" + midPool.Count + " under=" + underPool.Count + " ground=" +
+                groundPool.Count + " wall=" + wallPool.Count);
 
-            var placements = LoadPlacements();
-            if (placements == null || placements.cards == null)
+            // Native-height baselines (MeasureHeight, same helper PlantTrees used), measured
+            // once per prefab and cached - only canopy/mid scale against h, but pool members
+            // can repeat across chunks so the cache still saves real work over 1000+ placements.
+            var heightCache = new Dictionary<GameObject, float>();
+            float Baseline(GameObject prefab)
             {
-                Debug.LogWarning("[DressSlice] PlantTrees: foliage_cards/placements.json missing; no trees placed.");
-                return;
-            }
-
-            int nSingle = 0, nGroup = 0, nLow = 0;
-            for (int i = 0; i < placements.cards.Length; i++)
-            {
-                var c = placements.cards[i];
-                float worldY = WorldTerrainHeight(terrain, c.x, c.y);
-                // Deterministic per placement (not per iteration order): variant pick, yaw,
-                // and scale jitter are all seeded by the placement's own index.
-                var rng = new System.Random(20260908 + i);
-
-                if (c.h_raw > 6f)
+                if (!heightCache.TryGetValue(prefab, out float h))
                 {
-                    bool useGroup = c.h_raw >= BackgroundGroupMinHRaw && groupTrees.Count > 0;
-                    var pool = useGroup ? groupTrees : (singleTrees.Count > 0 ? singleTrees : groupTrees);
-                    if (pool.Count == 0) continue;
-                    var prefab = pool[rng.Next(pool.Count)];
-                    float baseline = Mathf.Max(1f, MeasureHeight(prefab));
-                    float scale = Mathf.Clamp(c.h_raw / baseline, 0.02f, 10f);
-                    float yaw = (float)(rng.NextDouble() * 360.0);
-
-                    var inst = (GameObject)PrefabUtility.InstantiatePrefab(prefab);
-                    inst.name = prefab.name + "_" + i;
-                    inst.transform.SetParent(treesRoot.transform, false);
-                    inst.transform.position = new Vector3(c.x, worldY, c.y);
-                    inst.transform.rotation = Quaternion.Euler(0f, yaw, 0f);
-                    inst.transform.localScale = Vector3.one * scale;
-                    if (useGroup) nGroup++; else nSingle++;
+                    h = Mathf.Max(1f, MeasureHeight(prefab));
+                    heightCache[prefab] = h;
                 }
-                else
+                return h;
+            }
+
+            var perLayer = new Dictionary<string, int> { { "canopy", 0 }, { "mid", 0 }, { "under", 0 }, { "ground", 0 }, { "wall", 0 } };
+            int total = 0;
+
+            foreach (var chunkObj in (List<object>)root["chunks"])
+            {
+                var chunk = (Dictionary<string, object>)chunkObj;
+                float s0 = AsFloat(chunk["s0"]);
+                string chunkName = "chunk_" + Mathf.RoundToInt(s0);
+                var chunkGo = new GameObject(chunkName);
+                chunkGo.transform.SetParent(forestRoot.transform, false);
+
+                int chunkCount = 0;
+                foreach (var plantObj in (List<object>)chunk["plants"])
                 {
-                    if (lowPool.Count == 0) continue;
-                    var prefab = lowPool[rng.Next(lowPool.Count)];
-                    float baseline = Mathf.Max(0.2f, MeasureHeight(prefab));
-                    float jitter = 0.9f + (float)rng.NextDouble() * 0.2f;
-                    float scale = Mathf.Clamp(c.h / baseline, 0.05f, 6f) * jitter;
+                    var p = (Dictionary<string, object>)plantObj;
+                    string layer = (string)p["layer"];
+                    float x = AsFloat(p["x"]);   // ENU east == Unity x
+                    float y = AsFloat(p["y"]);   // ENU north == Unity z (identity mapping, per project convention)
+                    float h = AsFloat(p["h"]);
+                    float yaw = AsFloat(p["yaw"]);
+                    float placementScale = AsFloat(p["scale"]);
 
-                    var inst = (GameObject)PrefabUtility.InstantiatePrefab(prefab);
-                    inst.name = prefab.name + "_" + i;
-                    inst.transform.SetParent(treesRoot.transform, false);
-                    inst.transform.position = new Vector3(c.x, worldY, c.y);
-                    inst.transform.rotation = Quaternion.Euler(0f, c.yaw_deg, 0f);
-                    inst.transform.localScale = Vector3.one * scale;
-                    nLow++;
-                }
-            }
-            Debug.Log("[DressSlice] PlantTrees: " + nSingle + " single tree(s), " + nGroup +
-                " tree-group cluster(s), " + nLow + " low-canopy (bush/tropical) instance(s).");
-        }
+                    GameObject prefab;
+                    float localScale;
+                    bool scaleToHeight;
 
-        // -------------------------------------------------------------------
-        // 4b. Understory scatter (SeedMesh rework): a dense band of small ground-cover /
-        // understory plants along both verges of the SLICE centreline, independent of the
-        // foliage_cards placements above (which are sparser and driven by canopy-height
-        // raster sampling, not a dense walk). Fixes "still sparse" between PlantTrees'
-        // relatively few large-canopy instances.
-        // -------------------------------------------------------------------
-        const float UnderstorySRangeLo = 439f, UnderstorySRangeHi = 664f; // matches the slice's own station range
-        const float UnderstoryStationStep = 1.5f;
-        const float UnderstoryLatMin = 4f, UnderstoryLatMax = 9f;
-        const float UnderstoryRoadClearance = 5.5f; // half-road + margin; anything closer is skipped
-        const int UnderstoryMaxResample = 6; // retries to find a lateral clearing the road before skipping
-
-        static void ScatterUnderstory()
-        {
-            var understoryRoot = ReplaceChild(GetSliceRoot(), "Understory");
-
-            var terrGo = GameObject.Find("[GEN] Terrain");
-            if (terrGo == null)
-            {
-                Debug.LogError("[DressSlice] ScatterUnderstory: [GEN] Terrain not found; run Amakeng/Build Scene first.");
-                return;
-            }
-            var terrain = terrGo.GetComponent<Terrain>();
-
-            string centerlinePath = Path.Combine(GenDir, "centerline.json");
-            if (!File.Exists(centerlinePath))
-            {
-                Debug.LogError("[DressSlice] ScatterUnderstory: centerline.json not found (run 70_sync_unity.py).");
-                return;
-            }
-            var cl = JsonUtility.FromJson<CenterlineRoot>(File.ReadAllText(centerlinePath));
-            if (cl == null || cl.stations == null || cl.stations.Length == 0)
-            {
-                Debug.LogError("[DressSlice] ScatterUnderstory: centerline.json has no stations.");
-                return;
-            }
-
-            var pool = DiscoverPrefabs(SeedMeshGroundFoliageRoot).Concat(DiscoverTropicalPlantsMix()).ToList();
-            if (pool.Count == 0)
-            {
-                Debug.LogError("[DressSlice] ScatterUnderstory: no prefabs found under " +
-                    SeedMeshGroundFoliageRoot + " / " + SeedMeshTropicalPlantsRoot + ".");
-                return;
-            }
-
-            var stations = cl.stations
-                .Where(st => !st.provisional && st.s >= UnderstorySRangeLo && st.s <= UnderstorySRangeHi)
-                .OrderBy(st => st.s).ToList();
-
-            int n = 0, attempted = 0, skipped = 0;
-            float nextS = UnderstorySRangeLo;
-            foreach (var st in stations)
-            {
-                if (st.s < nextS) continue;
-                nextS += UnderstoryStationStep;
-
-                // ENU left normal = (-ty, tx) (see PlaceBarrier's derivation); side=+1 is
-                // left of travel, side=-1 is right - covers "both sides" of the road.
-                foreach (int side in new[] { 1, -1 })
-                {
-                    attempted++;
-                    var rng = new System.Random(20260908 + attempted);
-                    float lat = 0f;
-                    for (int t = 0; t < UnderstoryMaxResample; t++)
+                    switch (layer)
                     {
-                        lat = UnderstoryLatMin + (float)rng.NextDouble() * (UnderstoryLatMax - UnderstoryLatMin);
-                        if (lat >= UnderstoryRoadClearance) break;
+                        case "canopy":
+                        {
+                            bool useGroup = h >= ForestCanopyGroupMinH && canopyGroupPool.Count > 0;
+                            var pool = useGroup ? canopyGroupPool : (canopyTallPool.Count > 0 ? canopyTallPool : canopyGroupPool);
+                            prefab = PickFromPool(pool, x, y);
+                            scaleToHeight = true;
+                            break;
+                        }
+                        case "mid":
+                            prefab = PickFromPool(midPool, x, y);
+                            scaleToHeight = true;
+                            break;
+                        case "under":
+                            prefab = PickFromPool(underPool, x, y);
+                            scaleToHeight = false;
+                            break;
+                        case "ground":
+                            prefab = PickFromPool(groundPool, x, y);
+                            scaleToHeight = false;
+                            break;
+                        case "wall":
+                            prefab = PickFromPool(wallPool, x, y);
+                            scaleToHeight = false;
+                            break;
+                        default:
+                            Debug.LogWarning("[DressSlice] PlantForest: unknown layer '" + layer + "' in " + chunkName + "; skipped.");
+                            continue;
                     }
-                    if (lat < UnderstoryRoadClearance) { skipped++; continue; }
+                    if (prefab == null) continue; // pool empty (already logged above)
 
-                    float worldX = st.x + side * lat * (-st.ty);
-                    float worldZ = st.y + side * lat * st.tx;
-                    float worldY = WorldTerrainHeight(terrain, worldX, worldZ);
-
-                    var prefab = pool[rng.Next(pool.Count)];
-                    float yaw = (float)(rng.NextDouble() * 360.0);
-                    float scale = 0.8f + (float)rng.NextDouble() * 0.5f;
+                    localScale = scaleToHeight ? Mathf.Clamp(h / Baseline(prefab), 0.05f, 10f) : placementScale;
+                    float worldY = WorldTerrainHeight(terrain, x, y);
 
                     var inst = (GameObject)PrefabUtility.InstantiatePrefab(prefab);
-                    inst.name = prefab.name + "_u" + n;
-                    inst.transform.SetParent(understoryRoot.transform, false);
-                    inst.transform.position = new Vector3(worldX, worldY, worldZ);
+                    inst.name = prefab.name + "_" + layer + "_" + total;
+                    inst.transform.SetParent(chunkGo.transform, false);
+                    inst.transform.position = new Vector3(x, worldY, y);
                     inst.transform.rotation = Quaternion.Euler(0f, yaw, 0f);
-                    inst.transform.localScale = Vector3.one * scale;
-                    n++;
+                    inst.transform.localScale = scaleToHeight
+                        ? Vector3.one * localScale
+                        : prefab.transform.localScale * localScale; // native scale x placement.scale
+                    MarkStaticRecursive(inst.transform);
+
+                    perLayer[layer]++;
+                    chunkCount++;
+                    total++;
                 }
+                Debug.Log("[DressSlice] PlantForest: " + chunkName + " -> " + chunkCount + " instance(s).");
             }
-            Debug.Log("[DressSlice] ScatterUnderstory: " + n + " instance(s) from " + pool.Count +
-                " prefab(s) (" + attempted + " candidate slot(s), " + skipped + " skipped for road clearance).");
+
+            Debug.Log("[DressSlice] PlantForest: TOTAL=" + total + " canopy=" + perLayer["canopy"] +
+                " mid=" + perLayer["mid"] + " under=" + perLayer["under"] + " ground=" + perLayer["ground"] +
+                " wall=" + perLayer["wall"]);
         }
 
         // -------------------------------------------------------------------
@@ -855,7 +1020,7 @@ namespace Amakeng
             int n = 0;
             foreach (var c in placements.cards)
             {
-                if (c.h > 5f) continue; // tall placements handled by PlantTrees
+                if (c.h > 5f) continue; // tall placements are PlantForest's job now
 
                 if (!matCache.TryGetValue(c.img, out var mat))
                 {
@@ -927,10 +1092,10 @@ namespace Amakeng
             // mesh-as-base baseline: the corridor clip (CLIP_M=7.5) leaves torn canopy
             // edges much closer to the camera than before, exposing backfaces through the
             // gaps. Clone each tile's material(s) with culling disabled so both sides
-            // render; stored under a dedicated folder shared with PlantTrees' converted
-            // tree materials, so this only ensures the folder exists (not wipe-and-
-            // recreate - that would delete PlantTrees' output, which runs earlier in
-            // Dress()) and deletes/recreates its own per-tile files individually.
+            // render; this only ensures GeneratedMaterialsDir exists (not wipe-and-recreate
+            // the whole folder) and deletes/recreates its own per-tile files individually -
+            // PlantForest places native SeedMesh prefabs and never writes into this folder,
+            // but the shared-folder-not-wipe discipline is kept regardless.
             const string matDir = GeneratedMaterialsDir;
             EnsureFolder(matDir);
 
@@ -1209,15 +1374,24 @@ namespace Amakeng
             light.lightUnit = UnityEngine.Rendering.LightUnit.Lux;
             light.intensity = SetupHdrp.SunIntensityLux;
             light.color = new Color(1f, 0.97f, 0.92f);
-            RenderSettings.sun = light;
+            RenderSettings.sun = light; // legacy "which light is the sun" pointer, not a fog/sky write - harmless under HDRP.
 
-            RenderSettings.fog = true;
-            RenderSettings.fogMode = FogMode.ExponentialSquared;
-            RenderSettings.fogDensity = 0.004f;
-            RenderSettings.fogColor = new Color(200f / 255f, 205f / 255f, 210f / 255f);
-
+            // HDRP migration (Task 1 follow-up, this task): atmosphere - sky, fog, exposure -
+            // is owned exclusively by SetupHdrp.BuildAtmosphereVolume()'s "[GEN] Atmosphere"
+            // Volume (PhysicallyBasedSky + Fog(meanFreePath=250) + fixed Exposure). The old
+            // URP-era RenderSettings.fog/fogMode/fogDensity/fogColor writes that used to live
+            // here were built-in-render-pipeline fog settings HDRP's own Fog volume component
+            // does not read - keeping them around risks looking like a second, conflicting
+            // "source of truth" for fog even though they're currently inert, so they're
+            // removed. SetAtmosphere's only remaining job is the sun: NOAA position (rotation)
+            // plus keeping its HDRP Lux intensity in sync (needed so this method alone, without
+            // a prior SetupHdrp.Run() in the same session, still leaves the sun correctly lit -
+            // see task-1-report.md section 0 for the bug this fixed: SetAtmosphere used to stomp the
+            // sun back down to a flat 1.1 "intensity", which under HDRP's physical Lux units is
+            // close to no light at all).
             Debug.Log("[DressSlice] SetAtmosphere: sun elevation=" + elevDeg.ToString("F1") +
-                " deg, azimuth=" + azDeg.ToString("F1") + " deg (compass); fog Exp2 density=0.004.");
+                " deg, azimuth=" + azDeg.ToString("F1") + " deg (compass), intensity=" +
+                light.intensity + " lux (fog/sky owned by SetupHdrp's Atmosphere volume - not written here).");
         }
     }
 }
