@@ -46,12 +46,14 @@ namespace Amakeng
         // ScatterUnderstory only ever set transform, never sharedMaterials - so there was
         // nothing to reassign there). The mutation had already corrupted 87 of the 108
         // materials under Assets/SeedMesh in this project; since the original shader
-        // assignment is not recoverable from the mutated .mat file itself, the actual
-        // one-time repair (done once, outside this build pipeline, for this task) restored
-        // pristine bytes for every affected .mat by GUID-matching against this machine's
-        // cached SeedMesh Asset Store packages (see task-1-report.md for the full method).
-        // That repair is a local data fix, not portable/idempotent code, so it does not
-        // belong here; what belongs here is (a) never calling FixSeedMeshMaterialsForUrp
+        // assignment is not recoverable from the mutated .mat file itself, the repair
+        // restores pristine bytes for every affected .mat by GUID-matching against this
+        // machine's cached SeedMesh Asset Store packages - see `scripts/
+        // fix_seedmesh_materials.py` (its own docstring has the full method) and
+        // `docs/full-circuit-rollout-notes.md`'s "SeedMesh material recovery" section. That
+        // repair depends on machine-local package cache paths, so it's a script to run when
+        // needed (WarnIfSeedMeshNotNative below names it), not something Dress() calls
+        // automatically; what belongs here is (a) never calling FixSeedMeshMaterialsForUrp
         // again (deleted), and (b) a cheap regression guard that fails loudly if any
         // Assets/SeedMesh material is ever found back on a "Universal ..." shader.
         static void WarnIfSeedMeshNotNative()
@@ -64,7 +66,9 @@ namespace Amakeng
                 if (mat != null && mat.shader != null && mat.shader.name.StartsWith("Universal Render Pipeline"))
                 {
                     Debug.LogError("[DressSlice] WarnIfSeedMeshNotNative: " + AssetDatabase.GUIDToAssetPath(guid) +
-                        " is still on a URP shader (" + mat.shader.name + "), not its native Shader Graph.");
+                        " is still on a URP shader (" + mat.shader.name + "), not its native Shader Graph. Restore " +
+                        "it with scripts/fix_seedmesh_materials.py (reads this machine's local Asset Store package " +
+                        "cache - see that script's docstring).");
                     nonNative++;
                 }
             }
@@ -241,36 +245,46 @@ namespace Amakeng
         // blocks in Unlit.cs.hlsl/UnlitData.hlsl - it affects path-traced rendering only, not
         // the real-time raster passes this project uses. The actual raster-time mechanism
         // (Editor/Material/Unlit/UnlitAPI.cs: `ValidateMaterial`) reads a DIFFERENT property,
-        // `HDStringConstants.kShadowMatteFilter` = "_ShadowMatteFilter" (not the brief's
-        // `_EnableShadowMatte`), to decide whether to set up the stencil bit that makes the
-        // surface receive real-time shadow/lighting compositing - so that is the property set
-        // here instead, followed by `HDShaderUtils.ResetMaterialKeywords()` (the same public
-        // API used to resync a Shader-Graph-vs-keyword-state mismatch) so the stencil actually
-        // gets (re)applied.
+        // `HDStringConstants.kShadowMatteFilter` = "_ShadowMatteFilter", to decide whether to
+        // set up the stencil bit that makes the surface receive real-time shadow/lighting
+        // compositing - but that property is not declared in the fixed "HDRP/Unlit" shader's
+        // own Properties block at all (confirmed by grep - zero occurrences in Unlit.shader),
+        // so `Material.HasProperty("_ShadowMatteFilter")` - the exact gate ValidateMaterial
+        // checks - is false on it regardless of what a script sets; Shadow Matte for Unlit
+        // surfaces is implemented exclusively via the HD Unlit Shader Graph subtarget's
+        // dedicated toggle (confirmed empirically too: a probe plane on "HDRP/Unlit" with
+        // `_ShadowMatteFilter=1` showed no shadow from a cube suspended above it - see
+        // task-1-report.md).
         //
-        // HOWEVER: `_ShadowMatteFilter` is not declared in the fixed "HDRP/Unlit" shader's own
-        // Properties block at all (confirmed by grep - zero occurrences in Unlit.shader), so
-        // `Material.HasProperty("_ShadowMatteFilter")` - the exact gate ValidateMaterial checks
-        // - is false on it regardless of what's set here; true Shadow Matte for Unlit surfaces
-        // is implemented exclusively via the HD Unlit Shader Graph subtarget's dedicated
-        // "Shadow Matte" toggle (Editor/Material/Unlit/ShaderGraph/HDUnlitData.cs), which bakes
-        // the property into a generated .shader asset - there is no fixed/non-graph shader that
-        // exposes it. Authoring that Shader Graph from script was investigated: its entire
-        // creation API (HDTarget, HDUnlitSubTarget, GraphData, GraphUtil) is `internal` to
-        // Unity's own Editor assemblies, so building one reliably without deep, fragile
-        // reflection into non-public Shader Graph internals was judged out of scope/too high
-        // risk for this task. This method therefore sets the technically-correct property name
-        // (harmless if inert) rather than the brief's non-existent one, but an empirical
-        // in-editor capture to confirm real-time shadows actually composite onto the overlay
-        // was not completed this round (blocked - see task-1-report.md) and should be the
-        // first thing re-checked once unblocked; if it does not, the fallback is authoring the
-        // HD Unlit Shader Graph by hand via the Editor UI once, committing the resulting
-        // .shadergraph/.shader asset, and pointing this method at it by name instead.
+        // Fix (per controller ruling, review round 2): rather than authoring that graph once
+        // by hand in the Shader Graph editor UI and committing the binary asset (the one
+        // exception to this project's "everything under Assets/Amakeng is generated by
+        // committed code" discipline), `scripts/72_shadowmatte_shadergraph.py` generates
+        // `Assets/Amakeng/HDRP/OverlayShadowMatteUnlit.shadergraph` from HDRP's own shipped
+        // SolidColor.shadergraph (a minimal, known-good single-target HD Unlit graph) by
+        // surgically editing its JSON text: swaps its Color property for a Texture2D property
+        // (exposed as `_UnlitColorMap`, matching the texture-property name this method already
+        // used) sampled through a "Sample Texture 2D" node into Base Color, and flips
+        // HDUnlitData's Shadow Matte flag on. Verified live: the resulting material's
+        // `_ShadowMatteFilter` property IS present (`HasProperty` true) and a shadow-casting
+        // probe cube confirmed a real shadow composites onto it, unlike the plain "HDRP/Unlit"
+        // shader - see task-1-report.md for the full comparison against the HDRP/Lit
+        // alternative (which also receives shadows, but re-lights the baked photo through
+        // normal PBR shading instead of keeping it Unlit; this Shader Graph route was chosen
+        // as the closer match to the brief's literal "HDRP Unlit + Shadow Matte" requirement).
         public static Material MakeShadowMatteUnlit(Texture tex)
         {
-            var m = new Material(Shader.Find("HDRP/Unlit"));
+            var shader = AssetDatabase.LoadAssetAtPath<Shader>(
+                "Assets/Amakeng/HDRP/OverlayShadowMatteUnlit.shadergraph");
+            if (shader == null)
+            {
+                Debug.LogError("[DressSlice] MakeShadowMatteUnlit: Assets/Amakeng/HDRP/OverlayShadowMatteUnlit.shadergraph " +
+                    "not found - run scripts/72_shadowmatte_shadergraph.py (via scripts/70_sync_unity.py) before Dress().");
+                shader = Shader.Find("HDRP/Unlit"); // degrade gracefully: still Unlit, just without Shadow Matte
+            }
+            var m = new Material(shader);
             if (tex != null) m.SetTexture("_UnlitColorMap", tex);
-            m.SetFloat("_ShadowMatteFilter", 1f);
+            if (m.HasProperty("_ShadowMatteFilter")) m.SetFloat("_ShadowMatteFilter", 1f);
             UnityEditor.Rendering.HighDefinition.HDShaderUtils.ResetMaterialKeywords(m);
             return m;
         }

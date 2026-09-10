@@ -48,3 +48,20 @@ git history on `vertical-slice`.
 - Play-mode probing needs OS foreground focus (PowerShell force-focus).
 - Row convention pinned by test: mosaic PNG top-origin, Unity UV bottom-origin
   (tests/test_stage69.py::test_v_row_convention).
+
+## SeedMesh material recovery
+
+The vertical-slice/URP-era `FixSeedMeshMaterialsForUrp()` (deleted in the Task 1 HDRP
+migration) mutated the SeedMesh packs' own shipped `.mat` assets in place to make them
+render under URP — 87 of 108 materials under `Assets/SeedMesh` in `C:\repos\AmakengCircuit`
+were found corrupted this way when HDRP migration started. If `DressSlice.
+WarnIfSeedMeshNotNative()` (runs on every `Dress()`) ever logs a material still on a
+`Universal Render Pipeline/...` shader, run `venv/Scripts/python
+scripts/fix_seedmesh_materials.py` (`--dry-run` first to preview) — it restores pristine
+bytes for affected `.mat` files straight out of this machine's cached SeedMesh Asset Store
+`.unitypackage` archives (GUID-matched against the project, so it never touches anything
+that isn't actually the corrupted copy of a pristine original). See the script's own
+docstring for the full mechanism and its "requires this machine's local Asset Store cache"
+caveat. `AssetDatabase.ImportPackage` does not work for this — it was observed to never
+actually execute when driven through the Unity MCP automation bridge this project's builds
+use, hence the direct byte-restore approach.
